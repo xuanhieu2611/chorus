@@ -2,7 +2,7 @@
 
 Companion to `PRD.md`. The PRD says *what* and *why*. This document says *what exactly gets built, with which tools, in which order*.
 
-**Status:** Phase 0 complete, Phase 1 next
+**Status:** Phase 1 complete, Phase 2 next
 **Last updated:** 2026-08-09
 
 ---
@@ -808,16 +808,20 @@ Use `@xyflow/react` with hardcoded node positions. No layout engine; the graph i
 
 Each phase ends in something you can run and look at. Do not start a phase before the prior one visibly works.
 
-### Phase 0 - Foundation
+### Phase 0 - Foundation ✅
 `create-next-app` (Next 16, App Router, TS, Tailwind 4), then shadcn/ui. Strip `baseUrl` from `tsconfig.json` if the template emitted one. Supabase project, apply `0001_init.sql`. `lib/db/client.ts`, `lib/llm/client.ts` (OpenRouter via AI SDK 7), `lib/events.ts`. Worker skeleton with `FOR UPDATE SKIP LOCKED` claim loop and heartbeat.
 
 **Do the structured-output spike first** (section 7.0): one throwaway file that calls your chosen model through OpenRouter with a small Zod schema, via both `Output.object` and `generateObject`. Confirm which returns clean typed data, whether strict schema mode is actually in effect, and what happens when the model returns malformed JSON. Then write `lib/llm/structured.ts` around the winner. Every later phase depends on this working.
 
 **Done:** `npm run build` type-checks under TS 7, and the worker claims a manually inserted campaign row, logs an event, exits cleanly.
 
-### Phase 1 - Ingest and transcribe
+### Phase 1 - Ingest and transcribe ✅
 Upload route streaming to disk. `ingest` node (ffprobe, audio extraction). `transcribe` node with Groq, chunking, and offset merging. Cost accounting and the ceiling check.
 **Done:** upload a real 60 minute podcast, get a word-timestamped transcript in Postgres. Unit test covers chunk-offset merging.
+
+**Built.** The graph executor (`lib/graph/run.ts`) landed with it, since `ingest` and `transcribe` are the first two nodes and the worker's Phase 0 seam was where it plugged in. Both media paths were exercised end to end on real speech: a video source (`has_video_stream = true`) and an MP3 (`false`). Beyond the unit tests, `scripts/verify-chunking.ts` transcribes one real file both whole and chunked and compares the timelines, which is what proves the merge arithmetic is wired to the actual slicing. The ceiling was verified by running a campaign under `CAMPAIGN_COST_CEILING_USD=0.0001`: the run failed at `transcribe`, kept the transcript it had already paid for, and resuming it afterwards skipped straight past transcription without spending again.
+
+Two things this phase added that are not in the list above: a minimal `/campaigns/[id]` dashboard polling `GET /api/campaigns/[id]` on an event cursor (Phase 8 swaps the poll for SSE and keeps the contract), and the unbuilt-node frontier described in `docs/ARCHITECTURE.md`.
 
 ### Phase 2 - Source Analyst
 Map-reduce analysis. Segments table populated. A basic segment list in the UI.

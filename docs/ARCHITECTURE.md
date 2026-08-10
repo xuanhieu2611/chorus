@@ -2,7 +2,7 @@
 
 Mirrors `MVP.md` section 6. **Changing `lib/graph/nodes.ts` means updating this diagram in the same commit**, and `components/AgentGraph.tsx` renders the same node set live.
 
-**Build state:** Phase 0 complete. The graph itself does not exist yet; the diagram below is the target, and the worker has a marked seam where the executor plugs in.
+**Build state:** Phase 1 complete. The executor exists and runs; `ingest` and `transcribe` are built. Every other node in the diagram below is still a target, and the executor parks a campaign when it reaches one (see "The unbuilt frontier").
 
 ---
 
@@ -80,6 +80,22 @@ node ──> agent ──> lib/tools/ ──> database / ffmpeg / storage
 ```
 
 Agents call `lib/tools/` and nothing else. No agent file imports the Supabase client, and no agent file calls the AI SDK directly. Both rules exist so that every action an agent takes is logged to `agent_runs.tool_calls` and `agent_events` without anyone remembering to log it, which is what fills the live UI.
+
+## Phase 1 decisions
+
+**The unbuilt frontier.** `lib/graph/nodes.ts` registers only the nodes that exist. Reaching an unregistered one parks the campaign: `current_node` keeps pointing at it, `status` becomes `complete`, and a `level:'warn'` event says the node is not built yet. Everything before it genuinely succeeded, and the moment that phase lands the same campaign resumes exactly there. Registering stubs instead would be worse — a node returning a plausible empty result makes an unbuilt phase look like a working one. This branch deletes itself: once every node has an implementation it is unreachable.
+
+**Upload is a raw body, not multipart.** `request.formData()` buffers the entire upload in memory and a 90 minute recording is 1 to 3 GB. The browser sends the `File` as the request body with the name in an `x-filename` header, and the route streams it to disk at constant memory. The name on disk is always `source{ext}` — a filename that came from a browser never becomes a path component.
+
+**The upload lands before the campaign row exists**, in `uploads/_pending/{token}/`. `POST /api/campaigns` inserts the row, renames that directory to the campaign id, and only then sets `status='queued'`. The row is inserted as `'ingesting'` for those few milliseconds because `'queued'` is the only signal the worker's claim query reads: enqueueing first would let a worker claim a campaign with no `source_path` and fail it instantly. Renaming beats copying — it is atomic on one filesystem and cannot half-move 3 GB.
+
+**Groq transcription cost is estimated, not reported.** Unlike OpenRouter, the transcription API returns no cost figure, so `transcribe` charges `USD_PER_AUDIO_HOUR` (list price, read 2026-08-09) times audio hours. If Groq reprices, the campaign total drifts low rather than reporting a false zero.
+
+**The transcript is saved before the cost is charged.** Crossing the ceiling must fail the run, but discarding a transcript that was already paid for would mean paying for it again on the retry. `transcribe` also returns early when a transcript already exists, so a campaign resumed after a crash in a later node does not re-transcribe.
+
+**Chunk offsets are planned starts, not summed durations.** `-c copy` lands on the nearest MP3 frame boundary, so each slice can begin up to ~26 ms early. Seeking every chunk independently from the source keeps that error bounded per chunk; accumulating measured durations would let it compound across all nine chunks of a 90 minute episode. `mergeChunks` and `planChunks` are pure and unit-tested, and `scripts/verify-chunking.ts` proves the arithmetic is actually wired to the slicing by transcribing one real file both ways and comparing the timelines (measured drift: 0.70 s, which is Whisper run-to-run wobble; a dropped offset would show tens of seconds).
+
+**An attached picture is not a video stream.** Cover art inside an MP3 is a video stream to `ffprobe`, and cropping a still image to 9:16 produces a frozen frame. `probe()` ignores streams with `disposition.attached_pic`, so `has_video_stream` means motion.
 
 ## Phase 0 decisions
 

@@ -8,7 +8,7 @@ The product thesis is that the system exercises judgment rather than running a p
 
 ## Current state
 
-**Phase 0 complete. Phase 1 is next.** Scaffold, schema, LLM wrapper, and worker claim loop exist. No agents, no graph, no media pipeline yet.
+**Phase 1 complete. Phase 2 is next.** Scaffold, schema, LLM wrapper, worker claim loop, the graph executor, and the ingest and transcribe nodes exist. Upload a podcast at `/` and a worker probes it, extracts audio, and writes a word-timestamped transcript to Postgres. No agents yet: the graph parks at `analyze` (see "The unbuilt frontier" in `docs/ARCHITECTURE.md`).
 
 `MVP.md` is the working document. Read it before touching anything: it fixes the stack with verified versions, the Postgres schema, the agent graph, per-agent contracts and Zod schemas, the FFmpeg pipeline, guardrails, and a 10-phase build plan where each phase ends in something runnable. Build in phase order and do not start a phase before the previous one visibly works.
 
@@ -30,12 +30,15 @@ Everything else:
 ```bash
 npm run build          # production build; also the TypeScript 7 type-check
 npx tsc --noEmit       # type-check alone, faster
-npm run worker:once    # claim at most one campaign, then exit. The Phase 0 smoke test
+npm run worker:once    # claim at most one campaign, then exit. The end-to-end smoke test
 npm test               # node --test over lib/**/*.test.ts
 npm test -- --test-name-pattern="chunk offset"   # a single test by name
 node --import tsx --test lib/media/transcribe.test.ts   # a single test file
 npm run db:push        # apply supabase/migrations to the linked project
 npm run lint           # eslint
+
+npx tsx scripts/inspect-transcript.ts <campaign-id>      # word timestamps, span, monotonicity
+npx tsx scripts/verify-chunking.ts <audio-file> [secs]   # chunked vs whole-file timeline; costs Groq time
 ```
 
 After any migration, regenerate the database types or the next type-check will lie to you:
@@ -59,6 +62,10 @@ The parts below span several files and are not obvious from any one of them.
 **The UI reads an event cursor, not the database.** `agent_events.id` is a monotonic bigint. The SSE route polls for `id > cursor` and streams new rows. Reconnects pass `?cursor=` so nothing is missed. The browser never holds database credentials.
 
 **Media branches on a probed fact.** `campaigns.has_video_stream` is set by `ffprobe` at ingest. Audio-only sources skip the 9:16 crop, skip frame sampling, and skip the vision call entirely. See `MVP.md` section 9.1.
+
+**Unimplemented nodes are absent from the registry, not stubbed.** `lib/graph/nodes.ts` registers only what exists; the executor parks a campaign that reaches anything else, leaving `current_node` on it so the phase that builds it resumes the same campaign in place. A stub returning an empty-but-plausible result would make an unbuilt phase look like a working one. The branch disappears on its own once every node is implemented.
+
+**Uploads arrive before campaigns exist.** `/api/upload` streams the raw request body (not multipart, which would buffer gigabytes in memory) into `uploads/_pending/{token}/`. `POST /api/campaigns` inserts the row as `ingesting`, renames that directory to the campaign id, then flips to `queued`. `queued` is the claim signal, so it must not be set before `source_path` is.
 
 ## Invariants
 
@@ -95,3 +102,13 @@ Direct social publishing, scheduling, analytics, team accounts, payments, mobile
 Source uploads stay on local disk under `STORAGE_DIR`; only rendered clips go to Supabase Storage, because the free tier caps a single upload at 50 MB and a 90 minute recording is 1 to 3 GB.
 
 Groq caps transcription uploads at 25 MB, so audio is downmixed to 16 kHz mono MP3 and chunked at 600 second boundaries above that. **Chunk offsets must be added to word timestamps before merging.** Getting this wrong silently misaligns every caption in the campaign, so it stays unit-tested.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

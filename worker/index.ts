@@ -4,6 +4,7 @@ import { db, type CampaignRow } from '../lib/db/client';
 import { emit } from '../lib/events';
 import { env } from '../lib/env';
 import { assertBudget, CostCeilingExceededError } from '../lib/llm/budget';
+import { runGraph } from '../lib/graph/run';
 
 loadEnv();
 
@@ -17,8 +18,8 @@ loadEnv();
  * HTTP request timeout, and why two workers can run side by side without ever
  * being handed the same campaign.
  *
- * Phase 0 scope: claim, heartbeat, log, release. The graph executor lands in
- * Phase 1 at the marked seam.
+ * The worker owns claiming, the heartbeat, and turning a thrown error into a
+ * failed campaign. Everything about what a campaign *does* lives in the graph.
  */
 
 const POLL_INTERVAL_MS = 2_000;
@@ -74,22 +75,14 @@ async function runCampaign(campaign: CampaignRow): Promise<void> {
     // campaign that was already over budget cannot be restarted into more spend.
     await assertBudget(campaign.id);
 
-    // ---------------------------------------------------------------------
-    // Phase 1 seam: `await runGraph({ campaign })` from lib/graph/run.ts goes
-    // here. Until then the claim loop is exercised end to end without agents.
-    // ---------------------------------------------------------------------
-    await emit({
-      campaignId: campaign.id,
-      agent: 'worker',
-      node: campaign.current_node,
-      level: 'decision',
-      message: 'No graph wired up yet (Phase 0). Marking the campaign complete.',
-    });
+    const result = await runGraph(campaign);
 
-    await db()
-      .from('campaigns')
-      .update({ status: 'complete', current_node: null, updated_at: new Date().toISOString() })
-      .eq('id', campaign.id);
+    // The graph owns `status`: a human gate set `awaiting_*` before returning,
+    // and a terminal node set its own final state. The worker must not overwrite
+    // that, or a campaign paused for approval would be marked complete.
+    console.log(
+      `[worker] campaign ${campaign.id} stopped at ${result.stoppedAt ?? 'end'} (${result.stopReason}) after ${result.steps} node(s)`,
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
