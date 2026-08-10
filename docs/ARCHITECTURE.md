@@ -2,7 +2,7 @@
 
 Mirrors `MVP.md` section 6. **Changing `lib/graph/nodes.ts` means updating this diagram in the same commit**, and `components/AgentGraph.tsx` renders the same node set live.
 
-**Build state:** Phase 3 complete. The executor runs through `ingest`, `transcribe`, `analyze`, `strategize`, `director_review_plan`, and the first human gate. It parks at `produce` after approval because Phase 4 is the next unbuilt frontier.
+**Build state:** Phase 4 complete. The executor runs through the first human gate and produces grounded X threads and LinkedIn posts. A text-only plan parks at the unbuilt `critique` node. A mixed plan stays parked at `produce` after its writing is ready so Phase 5 can resume the same campaign with the Clip Producer.
 
 ---
 
@@ -80,6 +80,16 @@ node ──> agent ──> lib/tools/ ──> database / ffmpeg / storage
 ```
 
 Agents call `lib/tools/` and nothing else. No agent file imports the Supabase client, and no agent file calls the AI SDK directly. Both rules exist so that every action an agent takes is logged to `agent_runs.tool_calls` and `agent_events` without anyone remembering to log it, which is what fills the live UI.
+
+## Phase 4 decisions
+
+**Grounding is a runtime property.** The Writing Agent sees verbatim transcript excerpts, not segment summaries. It also receives overlapping 24-word quote options generated deterministically from those excerpts, which gives weaker development models short spans they can copy without changing transcription grammar. Its output maps every factual claim to a `source_quote`, and TypeScript accepts a quote only when it occurs in one of the selected excerpts after normalizing case and whitespace. A semantic grounding failure gets one full regeneration with the exact bad claims and quotes named. A second failure stops the node, so an ungrounded asset never reaches `needs_review` or the UI as plausible finished work.
+
+**Schema repair and editorial validation are different runs.** `callStructured` repairs malformed shape inside one `agent_runs` row. Grounding and platform lengths are runtime checks: the development model repeatedly ignored Zod string maxima because strict provider schemas are unavailable, while an exact failure such as `tweet 2 is 314 characters` produced a useful correction. A schema-valid but ungrounded or overlong asset therefore creates a separate regeneration row. The history shows whether the model failed to format an answer or failed the product's correctness contract.
+
+**Credits and generation status move atomically.** `begin_asset_generation` locks both rows, checks the fixed cost and campaign budget, increments `credits_spent`, and changes the asset from `planned` to `generating` in one transaction. Calling it again while the asset is already `generating` is free. A worker can die anywhere after that point without charging the planning credits twice when production resumes.
+
+**Phase 4 sweeps written assets temporarily.** The final graph alternates `produce` and `critique` one asset at a time, but the Critic does not exist until Phase 6. Phase 4 produces every planned text asset so the promised X and LinkedIn outputs can both be inspected. If the plan also contains videos, the node returns terminally with `current_node = produce` and `status = complete`; this is the same honest frontier pattern used by the executor and lets Phase 5 resume in place. With no videos left, it advances to the unbuilt `critique` frontier. Phase 6 removes the sweep in favor of the diagram's final loop.
 
 ## Phase 3 decisions
 

@@ -2,6 +2,7 @@ import { mkdir, stat } from 'node:fs/promises';
 import { reviewStrategy } from '@/lib/agents/director';
 import { analyzeSource } from '@/lib/agents/source-analyst';
 import { createStrategy } from '@/lib/agents/strategist';
+import { writeAsset, type WrittenAssetType } from '@/lib/agents/writer';
 import { emit } from '@/lib/events';
 import { env } from '@/lib/env';
 import { chargeCampaign } from '@/lib/llm/budget';
@@ -13,7 +14,9 @@ import {
 } from '@/lib/media/paths';
 import { PROVIDER, transcribeAudio } from '@/lib/media/transcribe';
 import {
+  beginAssetGeneration,
   countSegments,
+  ensurePlannedAssets,
   getDirectorReview,
   getLatestStrategy,
   getRevisionRequest,
@@ -25,6 +28,7 @@ import {
   saveSegments,
   saveStrategy,
   saveTranscript,
+  saveWrittenAsset,
 } from '@/lib/tools';
 import type { NodeFn, NodeId, NodeResult } from '@/lib/graph/types';
 
@@ -32,9 +36,10 @@ import type { NodeFn, NodeId, NodeResult } from '@/lib/graph/types';
  * One function per node. Control flow lives here; the executor in
  * `lib/graph/run.ts` only walks the edges these functions return.
  *
- * Built so far: `ingest` and `transcribe` (Phase 1), `analyze` (Phase 2), and
- * `strategize`, `director_review_plan`, and `await_strategy_approval` (Phase 3).
- * Nodes for later phases are absent from the registry rather than stubbed, and
+ * Built so far: `ingest` and `transcribe` (Phase 1), `analyze` (Phase 2),
+ * `strategize`, `director_review_plan`, and the first gate (Phase 3), plus the
+ * Writing Agent branch of `produce` (Phase 4). Nodes for later phases are absent
+ * from the registry rather than stubbed, and
  * `run.ts` stops cleanly when it reaches one. A plausible empty stub is worse
  * than a missing entry because it makes an unbuilt phase look complete.
  */
@@ -400,6 +405,126 @@ const awaitStrategyApproval: NodeFn = async (): Promise<NodeResult> => ({
   reason: 'Strategy passed Director review and is waiting for human approval before production spends more credits.',
 });
 
+/**
+ * Materialize the approved plan and produce its written assets from verbatim
+ * source excerpts. Phase 4 sweeps the text portion of the plan so an X thread
+ * and LinkedIn post can both be inspected before the Critic exists. Phase 6
+ * narrows this to the graph's final one-asset-at-a-time produce/critique loop.
+ *
+ * A mixed plan parks on `produce` after its text is ready. Keeping the precise
+ * node there means Phase 5 can resume the same campaign to render its clips.
+ */
+const produce: NodeFn = async (ctx): Promise<NodeResult> => {
+  const { campaign, campaignId } = ctx;
+  const strategy = await getLatestStrategy(campaignId);
+  if (!strategy) throw new Error('Production reached without a saved strategy.');
+  if (strategy.approved_by !== 'human') {
+    throw new Error(`Strategy v${strategy.version} has not passed the human approval gate.`);
+  }
+
+  const plan = planFromStrategy(strategy);
+  const [assets, segments] = await Promise.all([
+    ensurePlannedAssets(campaignId, plan.planned_assets),
+    getSegments(campaignId),
+  ]);
+  const segmentById = new Map(segments.map((segment) => [segment.id, segment]));
+  const assetByKey = new Map(assets.map((asset) => [asset.plan_key, asset]));
+  let produced = 0;
+  let reused = 0;
+
+  for (const planned of plan.planned_assets) {
+    if (!isWrittenType(planned.type)) continue;
+    const asset = assetByKey.get(planned.plan_key);
+    if (!asset) throw new Error(`No asset row exists for ${planned.plan_key}.`);
+
+    if (asset.status === 'needs_review' && asset.content) {
+      reused++;
+      continue;
+    }
+    if (asset.status !== 'planned' && asset.status !== 'generating') {
+      throw new Error(
+        `Written asset ${planned.plan_key} cannot be produced from status ${asset.status}.`,
+      );
+    }
+
+    const sources = planned.segment_ids.map((id) => {
+      const segment = segmentById.get(id);
+      if (!segment) throw new Error(`Writing plan ${planned.plan_key} references missing segment ${id}.`);
+      return {
+        id: segment.id,
+        startTime: Number(segment.start_time),
+        endTime: Number(segment.end_time),
+        transcript: segment.transcript,
+      };
+    });
+
+    const remainingCredits = await beginAssetGeneration(asset.id, planned.credits);
+    await emit({
+      campaignId,
+      agent: 'writing_agent',
+      node: 'produce',
+      level: 'tool',
+      message: `${planned.plan_key}: read ${sources.length} verbatim source excerpt${sources.length === 1 ? '' : 's'} and reserved ${planned.credits} credits.`,
+      data: {
+        asset_id: asset.id,
+        source_segment_ids: planned.segment_ids,
+        remaining_credits: remainingCredits,
+      },
+    });
+
+    const output = await writeAsset({
+      campaignId,
+      planKey: planned.plan_key,
+      type: planned.type,
+      topic: planned.topic,
+      purpose: planned.purpose,
+      sources,
+      goal: campaign.goal,
+      audience: campaign.audience,
+      brandVoice: campaign.brand_voice,
+    });
+    const saved = await saveWrittenAsset(asset.id, output);
+    produced++;
+
+    await emit({
+      campaignId,
+      agent: 'writing_agent',
+      node: 'produce',
+      level: 'tool',
+      message: `${planned.plan_key}: saved ${labelForWrittenType(planned.type)} with ${output.grounding.length} verified source quote${output.grounding.length === 1 ? '' : 's'}.`,
+      data: {
+        asset_id: saved.id,
+        plan_key: planned.plan_key,
+        grounding_count: output.grounding.length,
+        status: saved.status,
+      },
+    });
+  }
+
+  const videoCount = plan.planned_assets.filter((asset) => asset.type === 'short_video').length;
+  const summary = `${produced} written asset${produced === 1 ? '' : 's'} generated${reused ? `, ${reused} reused from an earlier run` : ''}`;
+
+  if (videoCount > 0) {
+    await emit({
+      campaignId,
+      agent: 'system',
+      node: 'produce',
+      level: 'warn',
+      message: `${videoCount} planned video asset${videoCount === 1 ? '' : 's'} remain for the Phase 5 Clip Producer. The campaign stays parked at produce so it can resume in place.`,
+    });
+    return {
+      next: null,
+      patch: { status: 'complete' },
+      reason: `Writing production complete: ${summary}. Video production is the next unbuilt frontier.`,
+    };
+  }
+
+  return {
+    next: 'critique',
+    reason: `Writing production complete: ${summary}. Every grounding quote was verified against the selected transcript before saving.`,
+  };
+};
+
 /** The registry the executor walks. Later phases add their nodes here and to the
  * mermaid diagram in `MVP.md` section 6 in the same commit. */
 export const NODES: Partial<Record<NodeId, NodeFn>> = {
@@ -409,7 +534,16 @@ export const NODES: Partial<Record<NodeId, NodeFn>> = {
   strategize,
   director_review_plan: directorReviewPlan,
   await_strategy_approval: awaitStrategyApproval,
+  produce,
 };
+
+function isWrittenType(type: string): type is WrittenAssetType {
+  return type === 'x_thread' || type === 'linkedin_post';
+}
+
+function labelForWrittenType(type: WrittenAssetType): string {
+  return type === 'x_thread' ? 'X thread' : 'LinkedIn post';
+}
 
 async function assertReadable(path: string): Promise<void> {
   const size = await sizeOf(path);

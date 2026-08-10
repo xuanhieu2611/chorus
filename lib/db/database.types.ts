@@ -506,6 +506,10 @@ export type Database = {
         Args: { p_campaign_id: string; p_cost: number }
         Returns: number
       }
+      begin_asset_generation: {
+        Args: { p_asset_id: string; p_credits: number }
+        Returns: number
+      }
       claim_campaign: {
         Args: { p_worker: string }
         Returns: {

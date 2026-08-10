@@ -7,9 +7,9 @@
  * automatically logged and shows up in the live UI, rather than depending on
  * somebody remembering to log it.
  *
- * Phase 1 exposed the transcript, Phase 2 added segments, and Phase 3 adds the
- * versioned strategy plus durable Director and human revision feedback. Video
- * and assets land with the agents that need them in Phases 4 and 5.
+ * Phase 1 exposed the transcript, Phase 2 added segments, Phase 3 added the
+ * versioned strategy, and Phase 4 adds durable assets with atomic credit
+ * reservation. Video tools land with the Clip Producer in Phase 5.
  */
 export { getTranscript, hasTranscript, saveTranscript, type Transcript } from '@/lib/tools/transcript';
 export {
@@ -27,3 +27,10 @@ export {
   saveStrategy,
   type RevisionRequest,
 } from '@/lib/tools/strategies';
+export {
+  beginAssetGeneration,
+  ensurePlannedAssets,
+  getCampaignAssets,
+  saveWrittenAsset,
+  type AssetStatus,
+} from '@/lib/tools/assets';

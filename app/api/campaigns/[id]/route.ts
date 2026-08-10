@@ -33,7 +33,7 @@ export async function GET(
 
   // These reads are independent. Start them together so the dashboard pays one
   // database round-trip interval rather than four in series.
-  const [transcriptResult, segmentsResult, strategyResult, events] = await Promise.all([
+  const [transcriptResult, segmentsResult, strategyResult, assetsResult, events] = await Promise.all([
     // The transcript itself is up to a megabyte of text and nothing on the
     // dashboard renders it, so the snapshot carries only proof that it exists.
     db()
@@ -56,10 +56,18 @@ export async function GET(
       .order('version', { ascending: false })
       .limit(1)
       .maybeSingle(),
+    db()
+      .from('assets')
+      .select(
+        'id, plan_key, type, platform, source_segment_ids, hook, content, media_url, duration_sec, status, revision_count, updated_at',
+      )
+      .eq('campaign_id', id)
+      .order('created_at', { ascending: true }),
     readEventsSince(id, Number.isFinite(cursor) ? cursor : 0),
   ]);
 
-  const secondaryError = transcriptResult.error ?? segmentsResult.error ?? strategyResult.error;
+  const secondaryError =
+    transcriptResult.error ?? segmentsResult.error ?? strategyResult.error ?? assetsResult.error;
   if (secondaryError) return Response.json({ error: secondaryError.message }, { status: 500 });
 
   const transcript = transcriptResult.data;
@@ -77,6 +85,7 @@ export async function GET(
       : null,
     segments: segments ?? [],
     strategy: strategyResult.data,
+    assets: assetsResult.data ?? [],
     events,
     cursor: events.length > 0 ? events[events.length - 1].id : cursor,
   });

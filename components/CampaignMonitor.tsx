@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { StrategyPanel, type StrategyView } from '@/components/StrategyPanel';
+import { AssetCard, type AssetView } from '@/components/AssetCard';
 
 /**
  * Live view of one campaign.
@@ -24,6 +25,8 @@ interface CampaignSnapshot {
   source_duration_sec: number | null;
   has_video_stream: boolean | null;
   cost_usd: number | string;
+  credits_spent: number;
+  credit_budget: number;
   error: string | null;
 }
 
@@ -64,6 +67,7 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
   const [transcript, setTranscript] = useState<TranscriptSummary | null>(null);
   const [segments, setSegments] = useState<SegmentRow[]>([]);
   const [strategy, setStrategy] = useState<StrategyView | null>(null);
+  const [assets, setAssets] = useState<AssetView[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const cursor = useRef(0);
@@ -86,6 +90,7 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
           setTranscript(payload.transcript);
           setSegments(payload.segments ?? []);
           setStrategy(payload.strategy ?? null);
+          setAssets(payload.assets ?? []);
           if (payload.events.length > 0) {
             setEvents((previous) => [...previous, ...payload.events]);
             cursor.current = payload.events[payload.events.length - 1].id;
@@ -146,7 +151,10 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
             label="Transcript"
             value={transcript ? `${transcript.word_count.toLocaleString('en-US')} words` : '—'}
           />
-          <Stat label="Spend" value={`$${Number(campaign.cost_usd).toFixed(4)}`} />
+          <Stat
+            label="Spend"
+            value={`$${Number(campaign.cost_usd).toFixed(4)} · ${campaign.credits_spent}/${campaign.credit_budget} cr`}
+          />
         </CardContent>
       </Card>
 
@@ -209,6 +217,24 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
           strategy={strategy}
           awaitingApproval={campaign.status === 'awaiting_strategy_approval'}
         />
+      )}
+
+      {assets.length > 0 && (
+        <section className="flex flex-col gap-3" aria-labelledby="campaign-assets-heading">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 id="campaign-assets-heading" className="text-base font-semibold">
+              Campaign assets
+            </h2>
+            <span className="text-muted-foreground text-xs">
+              {assets.filter((asset) => asset.status === 'needs_review').length} ready for critique
+            </span>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            {assets.map((asset) => (
+              <AssetCard key={asset.id} asset={asset} sources={segments} />
+            ))}
+          </div>
+        </section>
       )}
 
       <Card>

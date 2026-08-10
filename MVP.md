@@ -2,7 +2,7 @@
 
 Companion to `PRD.md`. The PRD says *what* and *why*. This document says *what exactly gets built, with which tools, in which order*.
 
-**Status:** Phase 3 complete, Phase 4 next
+**Status:** Phase 4 complete, Phase 5 next
 **Last updated:** 2026-08-09
 
 ---
@@ -843,9 +843,15 @@ Strategy generation with code-enforced budget validation. Director review with i
 
 Paid decisions are resumable. A saved strategy with no revision request is reused after a crash, and the Director's successful `agent_runs.output` is the durable review record. Director and human rejections create a new strategy version; `replan_count` is advanced in code and capped before another model call. The gate route writes human feedback before requeueing and sets the resume node explicitly: approval goes to `produce`, while a change request goes to `strategize`. Merely setting `status = 'queued'` would re-enter the gate forever.
 
-### Phase 4 - Writing Agent
+### Phase 4 - Writing Agent ✅
 Text assets end to end, with grounding verification. Asset cards.
 **Done:** a real X thread and LinkedIn post, every claim traceable to a transcript quote.
+
+**Built.** `lib/agents/writer.ts`, the durable asset tools, atomic credit reservation, the Writing Agent branch of `produce`, and grounded asset cards on the dashboard. The agent receives only verbatim excerpts from the plan's selected segments. Its `grounding` array is checked in code by normalizing case and whitespace and requiring every quote to occur in one of those excerpts. A schema-valid asset with a fabricated or paraphrased quote gets one complete regeneration with the exact failures named, then the node fails rather than saving ungrounded content.
+
+Credit reservation and the `planned` to `generating` transition happen in one Postgres function. Re-entering an asset already marked `generating` does not charge it twice, which closes the worker-crash seam between spending credits and saving output. Asset creation is likewise idempotent on `(campaign_id, plan_key)`, and existing work is never overwritten when it no longer matches the approved plan.
+
+Until the Critic lands in Phase 6, `produce` sweeps all written assets so both platform outputs are inspectable. A mixed plan then parks on `produce`, not `critique`, leaving the same campaign resumable for Phase 5's Clip Producer. This temporary branch disappears when video production exists; Phase 6 then narrows production to the final one-asset-at-a-time loop shown in section 6.
 
 ### Phase 5 - Clip Producer
 The full media pipeline. Draft cut, inspection, boundary adjustment, final 9:16 render with burned captions, upload to Supabase Storage. Build the video path first, then add the `has_video_stream` branch from section 9.1.

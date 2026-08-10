@@ -2,9 +2,9 @@ import Link from 'next/link';
 import { CampaignMonitor } from '@/components/CampaignMonitor';
 
 /**
- * The live dashboard. Phase 1 shows source facts, transcript progress, and the
- * event timeline; the agent graph and the asset cards land with the agents that
- * populate them.
+ * The live dashboard. It shows source facts, analysis, strategy approval,
+ * grounded written assets, and the event timeline. The live graph lands in
+ * Phase 8 after every production and review node exists.
  */
 export default async function CampaignPage({ params }: PageProps<'/campaigns/[id]'>) {
   const { id } = await params;
