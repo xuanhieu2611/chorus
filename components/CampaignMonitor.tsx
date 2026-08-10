@@ -41,12 +41,27 @@ interface TranscriptSummary {
   word_count: number;
 }
 
+interface SegmentRow {
+  id: string;
+  start_time: number | string;
+  end_time: number | string;
+  topic: string;
+  summary: string | null;
+  content_type: string;
+  energy: number | string | null;
+  standalone_score: number | string | null;
+  novelty_score: number | string | null;
+  potential_hooks: string[];
+  context_deps: string | null;
+}
+
 const TERMINAL = ['complete', 'failed', 'cancelled'];
 const POLL_MS = 1_500;
 
 export function CampaignMonitor({ campaignId }: { campaignId: string }) {
   const [campaign, setCampaign] = useState<CampaignSnapshot | null>(null);
   const [transcript, setTranscript] = useState<TranscriptSummary | null>(null);
+  const [segments, setSegments] = useState<SegmentRow[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const cursor = useRef(0);
@@ -67,6 +82,7 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
           setLoadError(null);
           setCampaign(payload.campaign);
           setTranscript(payload.transcript);
+          setSegments(payload.segments ?? []);
           if (payload.events.length > 0) {
             setEvents((previous) => [...previous, ...payload.events]);
             cursor.current = payload.events[payload.events.length - 1].id;
@@ -137,6 +153,53 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
         </p>
       )}
 
+      {segments.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">
+              {segments.length} candidate topics
+              <span className="text-muted-foreground ml-2 text-xs font-normal">
+                found by the Source Analyst
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col">
+            {segments.map((segment, index) => (
+              <div key={segment.id}>
+                {index > 0 && <Separator />}
+                <div className="flex flex-col gap-1.5 py-3">
+                  <div className="flex flex-wrap items-baseline gap-2">
+                    <span className="text-muted-foreground shrink-0 font-mono text-[11px]">
+                      {clock(segment.start_time)}-{clock(segment.end_time)}
+                    </span>
+                    <span className="text-sm font-medium">{segment.topic}</span>
+                    <Badge variant="outline" className="text-[10px]">
+                      {segment.content_type.replace(/_/g, ' ')}
+                    </Badge>
+                  </div>
+                  {segment.summary && (
+                    <p className="text-muted-foreground text-sm">{segment.summary}</p>
+                  )}
+                  {segment.potential_hooks.length > 0 && (
+                    <p className="text-muted-foreground text-xs italic">
+                      “{segment.potential_hooks[0]}”
+                    </p>
+                  )}
+                  <div className="text-muted-foreground flex gap-4 font-mono text-[11px]">
+                    <span>standalone {score(segment.standalone_score)}</span>
+                    <span>novelty {score(segment.novelty_score)}</span>
+                    <span>energy {score(segment.energy)}</span>
+                    {segment.context_deps && (
+                      <span className="text-amber-500">needs: {segment.context_deps}</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Activity</CardTitle>
@@ -197,6 +260,16 @@ function levelColor(level: EventRow['level']): string {
     default:
       return 'text-muted-foreground';
   }
+}
+
+/** Segment boundaries as mm:ss, so they can be checked against the audio by hand. */
+function clock(seconds: number | string): string {
+  const total = Math.floor(Number(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function score(value: number | string | null): string {
+  return value === null ? '—' : Number(value).toFixed(2);
 }
 
 function formatDuration(seconds: number | null): string {

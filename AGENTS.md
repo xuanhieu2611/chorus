@@ -8,7 +8,7 @@ The product thesis is that the system exercises judgment rather than running a p
 
 ## Current state
 
-**Phase 1 complete. Phase 2 is next.** Scaffold, schema, LLM wrapper, worker claim loop, the graph executor, and the ingest and transcribe nodes exist. Upload a podcast at `/` and a worker probes it, extracts audio, and writes a word-timestamped transcript to Postgres. No agents yet: the graph parks at `analyze` (see "The unbuilt frontier" in `docs/ARCHITECTURE.md`).
+**Phase 2 complete. Phase 3 is next.** Scaffold, schema, LLM wrapper, worker claim loop, the graph executor, and the `ingest`, `transcribe`, and `analyze` nodes exist. Upload a podcast at `/` and a worker probes it, extracts audio, writes a word-timestamped transcript, and runs the Source Analyst's map-reduce to fill `segments`. The graph now parks at `strategize` (see "The unbuilt frontier" in `docs/ARCHITECTURE.md`).
 
 `MVP.md` is the working document. Read it before touching anything: it fixes the stack with verified versions, the Postgres schema, the agent graph, per-agent contracts and Zod schemas, the FFmpeg pipeline, guardrails, and a 10-phase build plan where each phase ends in something runnable. Build in phase order and do not start a phase before the previous one visibly works.
 
@@ -39,6 +39,7 @@ npm run lint           # eslint
 
 npx tsx scripts/inspect-transcript.ts <campaign-id>      # word timestamps, span, monotonicity
 npx tsx scripts/verify-chunking.ts <audio-file> [secs]   # chunked vs whole-file timeline; costs Groq time
+npx tsx scripts/verify-analysis.ts <campaign-id> [win] [overlap]  # forces the multi-window map-reduce; costs model calls
 ```
 
 After any migration, regenerate the database types or the next type-check will lie to you:

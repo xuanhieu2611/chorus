@@ -1,4 +1,5 @@
 import { mkdir, stat } from 'node:fs/promises';
+import { analyzeSource } from '@/lib/agents/source-analyst';
 import { emit } from '@/lib/events';
 import { chargeCampaign } from '@/lib/llm/budget';
 import { extractAudio, probe } from '@/lib/media/ffmpeg';
@@ -8,16 +9,22 @@ import {
   resolveSourcePath,
 } from '@/lib/media/paths';
 import { PROVIDER, transcribeAudio } from '@/lib/media/transcribe';
-import { hasTranscript, saveTranscript } from '@/lib/tools';
+import {
+  countSegments,
+  getTranscript,
+  hasTranscript,
+  saveSegments,
+  saveTranscript,
+} from '@/lib/tools';
 import type { NodeFn, NodeId, NodeResult } from '@/lib/graph/types';
 
 /**
  * One function per node. Control flow lives here; the executor in
  * `lib/graph/run.ts` only walks the edges these functions return.
  *
- * Phase 1 implements `ingest` and `transcribe`. Nodes for later phases are
- * absent from the registry rather than stubbed, and `run.ts` stops cleanly when
- * it reaches one. A stub that returns a plausible-looking empty result is worse
+ * Built so far: `ingest` and `transcribe` (Phase 1), `analyze` (Phase 2). Nodes
+ * for later phases are absent from the registry rather than stubbed, and
+ * `run.ts` stops cleanly when it reaches one. A stub that returns a plausible-looking empty result is worse
  * than a missing entry: it makes an unbuilt phase look like a working one.
  */
 
@@ -171,11 +178,89 @@ const transcribe: NodeFn = async (ctx): Promise<NodeResult> => {
   };
 };
 
+/**
+ * Source Analyst: the transcript becomes a scored pool of topic segments.
+ *
+ * The agent owns judgement (what is interesting, how standalone it is); this
+ * node owns everything around it: resumption, progress reporting, and turning
+ * the result into the one line the demo opens on. The map-reduce and the
+ * boundary arithmetic live in `lib/agents/source-analyst.ts`.
+ */
+const analyze: NodeFn = async (ctx): Promise<NodeResult> => {
+  const { campaign, campaignId } = ctx;
+
+  // Analysis is the first genuinely expensive node, a dozen model calls on a
+  // 90 minute episode. A campaign resumed after a crash further downstream must
+  // not pay for it twice, and segments already in the table are as good as the
+  // ones a re-run would produce.
+  const existing = await countSegments(campaignId);
+  if (existing > 0) {
+    return {
+      next: 'strategize',
+      reason: `Reusing ${existing} segments from an earlier analysis of this campaign.`,
+    };
+  }
+
+  const transcript = await getTranscript(campaignId);
+
+  const result = await analyzeSource({
+    campaignId,
+    words: transcript.words,
+    goal: campaign.goal,
+    audience: campaign.audience,
+    brandVoice: campaign.brand_voice,
+    onProgress: ({ done, of }) => {
+      void emit({
+        campaignId,
+        agent: 'source_analyst',
+        node: 'analyze',
+        level: 'tool',
+        message: `Scanned window ${done} of ${of}.`,
+      });
+    },
+    onWindowFailure: ({ index, error }) => {
+      // Named rather than swallowed. A window that produced nothing is a hole in
+      // the episode, and a person reading the timeline should be able to see
+      // which minutes the campaign was planned without.
+      void emit({
+        campaignId,
+        agent: 'source_analyst',
+        node: 'analyze',
+        level: 'warn',
+        message: `Window ${index + 1} could not be analyzed and was skipped: ${error}`,
+      });
+    },
+  });
+
+  const saved = await saveSegments(campaignId, result.segments);
+
+  await emit({
+    campaignId,
+    agent: 'source_analyst',
+    node: 'analyze',
+    level: 'info',
+    message: `Reduced ${result.candidateCount} candidates from ${result.windowCount} windows down to ${saved.length} segments. ${result.reasoning}`,
+    data: {
+      window_count: result.windowCount,
+      candidate_count: result.candidateCount,
+      failed_windows: result.failedWindows,
+      segment_count: saved.length,
+    },
+  });
+
+  // The line the demo opens on (MVP section 13, step 2).
+  return {
+    next: 'strategize',
+    reason: `Found ${saved.length} candidate topic${saved.length === 1 ? '' : 's'} across ${formatDuration(Number(campaign.source_duration_sec ?? 0))} of source.`,
+  };
+};
+
 /** The registry the executor walks. Later phases add their nodes here and to the
  * mermaid diagram in `MVP.md` section 6 in the same commit. */
 export const NODES: Partial<Record<NodeId, NodeFn>> = {
   ingest,
   transcribe,
+  analyze,
 };
 
 async function assertReadable(path: string): Promise<void> {

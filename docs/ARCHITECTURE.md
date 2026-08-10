@@ -2,7 +2,7 @@
 
 Mirrors `MVP.md` section 6. **Changing `lib/graph/nodes.ts` means updating this diagram in the same commit**, and `components/AgentGraph.tsx` renders the same node set live.
 
-**Build state:** Phase 1 complete. The executor exists and runs; `ingest` and `transcribe` are built. Every other node in the diagram below is still a target, and the executor parks a campaign when it reaches one (see "The unbuilt frontier").
+**Build state:** Phase 2 complete. The executor exists and runs; `ingest`, `transcribe`, and `analyze` are built. Every other node in the diagram below is still a target, and the executor parks a campaign when it reaches one (see "The unbuilt frontier").
 
 ---
 
@@ -80,6 +80,20 @@ node ──> agent ──> lib/tools/ ──> database / ffmpeg / storage
 ```
 
 Agents call `lib/tools/` and nothing else. No agent file imports the Supabase client, and no agent file calls the AI SDK directly. Both rules exist so that every action an agent takes is logged to `agent_runs.tool_calls` and `agent_events` without anyone remembering to log it, which is what fills the live UI.
+
+## Phase 2 decisions
+
+**Map-reduce is forced by more than context length.** A 90 minute episode is 120k to 180k tokens, so the map pass exists for the obvious reason. But it would still exist on a 1M context model, because two of the analyst's judgements are structurally impossible inside a single window: `novelty_score` is meaningless relative to one eight-minute slice, and a topic straddling a window boundary can only be recognised as one topic by something that sees both. So novelty is absent from the map schema entirely, and the reduce pass, the only stage that sees the whole candidate pool, owns both. It returns `candidate_ids` per segment, which makes a merge auditable against the candidates it claims to combine.
+
+**Windows overlap by 60 s, and the last one is folded away.** Without overlap, a topic on a boundary is truncated in both windows; with it, anything shorter than the overlap is seen whole by at least one. The duplicate that creates is the reduce pass's job, and it is the cheap direction of the trade: a duplicate is recoverable, a bisected topic is not. A final window that adds less new material than the overlap is folded into its predecessor instead of emitted, because it is a paid call that can only produce duplicates. **The fold appends its unseen words to the previous window**; the first version only moved the boundary, which silently dropped the last twenty seconds of the episode from analysis. A unit test caught it, which is the argument for `planWindows` being pure.
+
+**Schema strictness is decided per constraint.** Strict schema mode is not in effect through OpenRouter (Phase 0 finding, below), so every constraint in a Zod schema is a constraint the model may miss and the repair pass then pays a round trip to fix. Score *ranges* are worth that: a `standalone_score` of 7 is a semantic error and the retry genuinely corrects it. Array and string *lengths* are not: `.slice(0, 3)` on `potential_hooks` costs nothing. Code clamps the scores anyway, because `segments.energy` carries a `between 0 and 1` check constraint and one stray value would fail the whole insert and take the node down with it.
+
+**The model proposes boundaries; TypeScript disposes.** `snapToWords` pulls each span onto real word edges and clamps it inside the transcript, so a hallucinated timestamp can never reach an ffmpeg `-ss`. `dropDuplicates` measures overlap against the *shorter* segment, so a 20 s aside living inside a 90 s answer counts as fully overlapping and is dropped. It is not a second topic. The 20-segment cap is applied to a list sorted by strength, weighted toward `standalone_score`, because everything this system produces is consumed with zero context by someone scrolling.
+
+**Three map calls in flight.** Sequential is ~13 round trips on a 90 minute episode; unbounded is a provider rate limit. A single window failing is tolerated and emits a `warn` naming which minutes are missing, but losing more than a third of the windows fails the node: that is not a degraded analysis, it is a different episode. `CostCeilingExceededError` is rethrown rather than collected, since letting the other two in-flight windows continue spends money the campaign has already been told to stop spending.
+
+**`analyze` is skipped when segments exist.** It is the first genuinely expensive node, and a campaign resumed after a crash further downstream must not pay for it twice. `saveSegments` deletes before inserting rather than upserting, because a re-analysis produces different segments rather than new versions of the old ones, and a partial old run interleaved with a complete new one is indistinguishable downstream.
 
 ## Phase 1 decisions
 

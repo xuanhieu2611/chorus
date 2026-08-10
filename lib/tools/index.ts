@@ -7,7 +7,13 @@
  * automatically logged and shows up in the live UI, rather than depending on
  * somebody remembering to log it.
  *
- * Phase 1 exposes the transcript. Segments, video, and assets land with the
- * agents that need them in Phases 2, 4, and 5.
+ * Phase 1 exposed the transcript and Phase 2 adds segments. Video and assets
+ * land with the agents that need them in Phases 4 and 5.
  */
 export { getTranscript, hasTranscript, saveTranscript, type Transcript } from '@/lib/tools/transcript';
+export {
+  countSegments,
+  getSegments,
+  saveSegments,
+  type SegmentFilter,
+} from '@/lib/tools/segments';

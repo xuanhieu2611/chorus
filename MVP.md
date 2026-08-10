@@ -2,7 +2,7 @@
 
 Companion to `PRD.md`. The PRD says *what* and *why*. This document says *what exactly gets built, with which tools, in which order*.
 
-**Status:** Phase 1 complete, Phase 2 next
+**Status:** Phase 2 complete, Phase 3 next
 **Last updated:** 2026-08-09
 
 ---
@@ -823,9 +823,17 @@ Upload route streaming to disk. `ingest` node (ffprobe, audio extraction). `tran
 
 Two things this phase added that are not in the list above: a minimal `/campaigns/[id]` dashboard polling `GET /api/campaigns/[id]` on an event cursor (Phase 8 swaps the poll for SSE and keeps the contract), and the unbuilt-node frontier described in `docs/ARCHITECTURE.md`.
 
-### Phase 2 - Source Analyst
+### Phase 2 - Source Analyst ✅
 Map-reduce analysis. Segments table populated. A basic segment list in the UI.
 **Done:** "Found 14 candidate topics" appears in the timeline, and the segments genuinely correspond to topic shifts. Spot-check five of them by hand against the audio.
+
+**Built.** `lib/agents/source-analyst.ts` (map-reduce), `lib/tools/segments.ts`, the `analyze` node, and a segment list on the dashboard. Three things about the shape of it are worth carrying forward:
+
+`novelty_score` is absent from the map schema. A point can only be novel relative to the rest of the episode, so no window can score it; the reduce pass assigns it once, over the whole candidate pool. Cross-window deduplication is the same argument, which is why the reduce returns `candidate_ids`: a merge is auditable against the candidates it claims to combine.
+
+**Schema strictness is chosen per constraint, not globally.** Strict mode is not in effect through OpenRouter, so every schema constraint costs a repair round trip when the model misses it. Score *ranges* stay in the schema, because a score outside 0..1 is a semantic error worth paying to fix. Array and string *lengths* do not, because `.slice(0, 3)` fixes them for free. Code then clamps scores anyway as a backstop: `segments.energy` has a `between 0 and 1` check constraint, and one bad score would fail the whole insert.
+
+Boundaries are code's, not the model's. `snapToWords` pulls every proposed span onto real word edges and clamps it inside the transcript, `dropDuplicates` removes anything overlapping a stronger segment by more than 60% of the shorter span, and the cap keeps the strongest 20 rather than the first 20. `scripts/verify-analysis.ts` forces the multi-window path on a short clip (`windowSeconds` override, same precedent as `TranscribeOptions.chunkSeconds`), because at the production 480 s window a test clip is one window and the interesting half of the agent never runs.
 
 ### Phase 3 - Strategist, Director, first gate
 Strategy generation with code-enforced budget validation. Director review with its `REJECT` to `strategize` loop. Strategy approval gate and resume-from-gate.

@@ -39,6 +39,18 @@ export async function GET(
     .eq('campaign_id', id)
     .maybeSingle();
 
+  // Segments are sent whole rather than behind a cursor: there are at most 20 of
+  // them and they only change when `analyze` re-runs, so the simple thing is also
+  // the cheap thing. `transcript` is excluded because a segment's source text is
+  // the part the UI actually shows.
+  const { data: segments } = await db()
+    .from('segments')
+    .select(
+      'id, start_time, end_time, topic, summary, content_type, energy, standalone_score, novelty_score, potential_hooks, context_deps',
+    )
+    .eq('campaign_id', id)
+    .order('start_time', { ascending: true });
+
   const events = await readEventsSince(id, Number.isFinite(cursor) ? cursor : 0);
 
   return Response.json({
@@ -51,6 +63,7 @@ export async function GET(
           word_count: Array.isArray(transcript.words) ? transcript.words.length : 0,
         }
       : null,
+    segments: segments ?? [],
     events,
     cursor: events.length > 0 ? events[events.length - 1].id : cursor,
   });
