@@ -8,20 +8,41 @@ The product thesis is that the system exercises judgment rather than running a p
 
 ## Current state
 
-**Docs only. No code yet.** The repo contains `PRD.md` (what and why) and `MVP.md` (the build spec). Nothing is scaffolded.
+**Phase 0 complete. Phase 1 is next.** Scaffold, schema, LLM wrapper, and worker claim loop exist. No agents, no graph, no media pipeline yet.
 
 `MVP.md` is the working document. Read it before touching anything: it fixes the stack with verified versions, the Postgres schema, the agent graph, per-agent contracts and Zod schemas, the FFmpeg pipeline, guardrails, and a 10-phase build plan where each phase ends in something runnable. Build in phase order and do not start a phase before the previous one visibly works.
 
+The structured-output spike (MVP section 7.0) has been run and retired; its findings, including two ceiling bugs it exposed, are recorded in `docs/ARCHITECTURE.md`. The short version: `Output.object` won, **strict schema mode is not in effect through OpenRouter**, so the repair pass in `lib/llm/structured.ts` is a live path rather than a safety net.
+
+**Development runs on a cheap model.** `MODEL_OVERRIDE_ALL` in `.env.local` points every agent role at one model (currently `google/gemini-2.5-flash-lite`, ~30x cheaper input than Sonnet 4.5), leaving `MODEL_REASONING`/`FAST`/`VISION` intact as the real configuration. Comment it out before judging output quality or recording the demo. Anything set there must accept images, or the Clip Producer's vision pass breaks on video sources.
+
 ## Commands
 
-None exist yet. Once Phase 0 scaffolds the project, the intended model is two processes running side by side:
+Two processes run side by side:
 
 ```bash
-npm run dev       # Next.js app
-npm run worker    # tsx watch worker/index.ts, runs the agent graph
+npm run dev            # Next.js app on :3000
+npm run worker         # tsx watch worker/index.ts, claims campaigns and runs the graph
 ```
 
-Update this section with the real commands, including how to run a single test, as soon as they exist.
+Everything else:
+
+```bash
+npm run build          # production build; also the TypeScript 7 type-check
+npx tsc --noEmit       # type-check alone, faster
+npm run worker:once    # claim at most one campaign, then exit. The Phase 0 smoke test
+npm test               # node --test over lib/**/*.test.ts
+npm test -- --test-name-pattern="chunk offset"   # a single test by name
+node --import tsx --test lib/media/transcribe.test.ts   # a single test file
+npm run db:push        # apply supabase/migrations to the linked project
+npm run lint           # eslint
+```
+
+After any migration, regenerate the database types or the next type-check will lie to you:
+
+```bash
+supabase gen types typescript --linked --schema public > lib/db/database.types.ts
+```
 
 ## Architecture
 
@@ -49,7 +70,7 @@ These are the ways this codebase gets quietly broken.
 
 **Never create `tailwind.config.js`.** Tailwind 4 is CSS-first. Config lives in an `@theme { }` block in `globals.css`. A generated JS config file is silently ignored and produces confusing debugging sessions.
 
-**Never add `baseUrl` to `tsconfig.json`.** TypeScript 7 removed it. Use `paths` alone, resolved relative to the config file, with `"moduleResolution": "bundler"`.
+**Never add `baseUrl` to `tsconfig.json`.** TypeScript 7 removed it. The stack sits on `typescript@6.0.3` (TS 7 breaks `typescript-eslint`, see `MVP.md` section 2), so `baseUrl` would technically work today, which is exactly the trap. Use `paths` alone, resolved relative to the config file, with `"moduleResolution": "bundler"`, and the eventual move back to TS 7 stays a version bump.
 
 **Branch on `has_video_stream`, never on file extension.** An MP4 can legally contain no video track. Extension-sniffing sends blank frames to a vision model.
 
@@ -57,7 +78,11 @@ These are the ways this codebase gets quietly broken.
 
 **Service role key stays server-side.** RLS is enabled on every table with zero policies, which denies everything. All access goes through Next.js route handlers and the worker. Adding real auth later means adding policies, not restructuring access.
 
-**Cost ceiling before agents.** Every LLM call adds to `campaigns.cost_usd`; crossing `CAMPAIGN_COST_CEILING_USD` fails the run. Build this in Phase 0. It is the protection against a loop bug spending real money overnight.
+**Cost ceiling before agents.** Every LLM call adds to `campaigns.cost_usd`; crossing `CAMPAIGN_COST_CEILING_USD` fails the run. Build this in Phase 0. It is the protection against a loop bug spending real money overnight. The increment happens inside Postgres (`add_campaign_cost`) so two concurrent calls cannot both read a stale total and slip past the limit together.
+
+**`lib/db/database.types.ts` is generated, never hand-edited.** It comes from the live database. Regenerate it in the same commit as any migration, or the type-checker will confidently describe a schema that no longer exists.
+
+**A plpgsql function returning a composite type cannot signal "nothing".** A NULL composite reaches PostgREST as a row with every column null, which client code reads as a successful result full of nulls. `claim_campaign` returns `setof public.campaigns` for exactly this reason: zero rows is unambiguous. This already caused one bug where a worker "claimed" a campaign with a null id. Any future RPC that can return nothing follows the same rule.
 
 ## Out of scope
 

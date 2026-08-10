@@ -2,7 +2,7 @@
 
 Companion to `PRD.md`. The PRD says *what* and *why*. This document says *what exactly gets built, with which tools, in which order*.
 
-**Status:** not started
+**Status:** Phase 0 complete, Phase 1 next
 **Last updated:** 2026-08-09
 
 ---
@@ -67,7 +67,7 @@ Every version below was read from the npm registry `latest` dist-tag on **2026-0
 |---|---|---|
 | `next` | 16.3.0 | Turbopack is the default bundler. Route `params` is a Promise and must be awaited. |
 | `react` / `react-dom` | 19.2.8 | |
-| `typescript` | 7.0.2 | Go-native compiler. See the caveat below. |
+| `typescript` | ~~7.0.2~~ **6.0.3** | Downgraded in Phase 0: TS 7 breaks ESLint. See the caveat below. |
 | `tailwindcss` | 4.3.3 | CSS-first config. There is no `tailwind.config.js`. |
 | `@tailwindcss/postcss` | 4.3.3 | The v4 PostCSS plugin. |
 | `ai` | 7.0.58 | Vercel AI SDK v7. |
@@ -85,6 +85,10 @@ The dependency graph is coherent: `@openrouter/ai-sdk-provider@3` peers on `ai@^
 **TypeScript 7 removes `baseUrl`.** The Go-native compiler dropped it, along with `outFile`, `target: ES5`, `moduleResolution: node10`, and AMD/UMD/System modules. Older `create-next-app` templates emit `"baseUrl": "."` alongside `paths`. If yours does, delete the `baseUrl` line and keep `paths` (resolved relative to `tsconfig.json`) with `"moduleResolution": "bundler"`. Next.js 16 only requires TypeScript >= 5.1, so it has no upper bound blocking v7.
 
 The one honest caveat: the typescript-go language service is still listed as "in progress" (nearly all features implemented) and its programmatic compiler API is "not ready." We never touch the compiler API, so the only exposure is editor smoothness. If your editor misbehaves, dropping to `typescript@6.0.2` is a one-line change with no code impact.
+
+**Correction, found in Phase 0. The stack now pins `typescript@6.0.3`, not 7.0.2.** The exposure is wider than editor smoothness: `typescript-eslint` does not support TS 7.0 and throws on load, which takes `eslint-config-next` down with it, so `npm run lint` fails outright. `npx tsc --noEmit` and `next build` are unaffected. An npm `overrides` entry does not help, because the conflict is on a `peerOptional` that npm resolves at the root. Faced with "TypeScript 7 and no linting" or "TypeScript 6 and a working lint", Phase 0 chose the lint. Nothing in the codebase changed; it is a one-line version bump, reversible the moment [typescript-eslint#10940](https://github.com/typescript-eslint/typescript-eslint/issues/10940) lands.
+
+The two TS 7 rules below still hold, because they cost nothing and keep the upgrade path open: no `baseUrl`, and `moduleResolution: bundler`.
 
 **Tailwind 4 has no JS config file.** Configuration is CSS-first. `globals.css` starts with `@import "tailwindcss";` and design tokens are declared in an `@theme { }` block. `postcss.config.mjs` uses `@tailwindcss/postcss`. Do not go looking for `tailwind.config.js` and do not let an agent generate one; it will be silently ignored.
 
@@ -885,7 +889,7 @@ State these in the README. Naming your own limits reads as engineering maturity;
 Decide these when you reach them; none block Phase 0.
 
 1. **Idempotent replans.** When the Campaign Reviewer replaces an asset, `assets.plan_key` is unique per campaign. Either mark the old row `replaced` and suffix the new key (`asset_3_v2`), or version the assets table. Suffixing is simpler and preserves history for the timeline. Decide at Phase 7.
-2. **Structured output API.** Resolved by the Phase 0 spike in section 7.0: pick `Output.object` or `generateObject`, wrap it in `lib/llm/structured.ts`, never call the SDK from an agent file.
-3. **Model selection.** Verify the three model IDs against openrouter.ai/models at Phase 0. They are env vars specifically so this is a config change.
+2. ~~**Structured output API.**~~ **Resolved in Phase 0.** `Output.object`, read from `result.output`, wrapped in `lib/llm/structured.ts`. The spike also established that strict schema mode is *not* in effect through OpenRouter, so the repair pass is the primary path. See `docs/ARCHITECTURE.md`.
+3. ~~**Model selection.**~~ **Resolved in Phase 0.** All three IDs verified against the OpenRouter models API on 2026-08-09. Added `MODEL_OVERRIDE_ALL` for cheap development runs; it must be unset for demos.
 4. **Dependency drift.** The versions in section 2 were verified 2026-08-09. If you start well after that, re-run the check before scaffolding rather than after.
 ```
