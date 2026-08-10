@@ -8,7 +8,7 @@ The product thesis is that the system exercises judgment rather than running a p
 
 ## Current state
 
-**Phase 2 complete. Phase 3 is next.** Scaffold, schema, LLM wrapper, worker claim loop, the graph executor, and the `ingest`, `transcribe`, and `analyze` nodes exist. Upload a podcast at `/` and a worker probes it, extracts audio, writes a word-timestamped transcript, and runs the Source Analyst's map-reduce to fill `segments`. The graph now parks at `strategize` (see "The unbuilt frontier" in `docs/ARCHITECTURE.md`).
+**Phase 3 complete. Phase 4 is next.** Scaffold, schema, LLM wrapper, worker claim loop, the graph executor, `ingest`, `transcribe`, `analyze`, `strategize`, `director_review_plan`, and the first human gate exist. Upload a podcast at `/` and a worker reaches a versioned, Director-reviewed strategy with explicit selected and rejected topics. Approve it in the dashboard and the graph parks at `produce`, the next unbuilt frontier (see `docs/ARCHITECTURE.md`).
 
 `MVP.md` is the working document. Read it before touching anything: it fixes the stack with verified versions, the Postgres schema, the agent graph, per-agent contracts and Zod schemas, the FFmpeg pipeline, guardrails, and a 10-phase build plan where each phase ends in something runnable. Build in phase order and do not start a phase before the previous one visibly works.
 

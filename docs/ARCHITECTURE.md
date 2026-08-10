@@ -2,7 +2,7 @@
 
 Mirrors `MVP.md` section 6. **Changing `lib/graph/nodes.ts` means updating this diagram in the same commit**, and `components/AgentGraph.tsx` renders the same node set live.
 
-**Build state:** Phase 2 complete. The executor exists and runs; `ingest`, `transcribe`, and `analyze` are built. Every other node in the diagram below is still a target, and the executor parks a campaign when it reaches one (see "The unbuilt frontier").
+**Build state:** Phase 3 complete. The executor runs through `ingest`, `transcribe`, `analyze`, `strategize`, `director_review_plan`, and the first human gate. It parks at `produce` after approval because Phase 4 is the next unbuilt frontier.
 
 ---
 
@@ -80,6 +80,16 @@ node ──> agent ──> lib/tools/ ──> database / ffmpeg / storage
 ```
 
 Agents call `lib/tools/` and nothing else. No agent file imports the Supabase client, and no agent file calls the AI SDK directly. Both rules exist so that every action an agent takes is logged to `agent_runs.tool_calls` and `agent_events` without anyone remembering to log it, which is what fills the live UI.
+
+## Phase 3 decisions
+
+**The plan is schema-valid first and campaign-valid second.** Zod checks the output shape. TypeScript checks relationships the schema cannot know: fixed per-type credit costs, total budget, enabled platforms, source segment membership, unique stable plan keys, the hard asset cap, and short-video duration. A relationship failure is sent back once with the exact violations. The prompt explains arithmetic, but only code is trusted to enforce it.
+
+**A paid decision is graph memory.** Strategies are versioned rows. If the worker crashes after saving one but before leaving `strategize`, the node reuses it instead of paying to recreate it. The Director's successful structured output already lives in `agent_runs`; `getDirectorReview` treats that as the durable decision record, so a crash after review does not buy the same review twice. A Director or human rejection is the only reason the Strategist creates the next version.
+
+**Replan accounting is tied to strategy versions.** Initial strategy v1 exists before any replan. A rejection of v1 consumes replan 1 and creates v2; a rejection of v2 consumes replan 2 and creates v3. Comparing `replan_count` with the reviewed version makes the patch idempotent when a worker dies after incrementing the counter but before traversing the edge. The limit stays in TypeScript, never in a prompt.
+
+**The gate route chooses a resume node.** The gate itself leaves `current_node = 'await_strategy_approval'`. Approval must queue `produce`, while a change request must queue `strategize` after its feedback is durable. Flipping only `status` back to `queued` would make the worker re-enter the gate and pause forever. Human feedback is written as an event before the campaign becomes claimable, which lets the Strategist read the exact request without adding transient worker memory.
 
 ## Phase 2 decisions
 

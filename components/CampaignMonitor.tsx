@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
+import { StrategyPanel, type StrategyView } from '@/components/StrategyPanel';
 
 /**
  * Live view of one campaign.
@@ -62,6 +63,7 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
   const [campaign, setCampaign] = useState<CampaignSnapshot | null>(null);
   const [transcript, setTranscript] = useState<TranscriptSummary | null>(null);
   const [segments, setSegments] = useState<SegmentRow[]>([]);
+  const [strategy, setStrategy] = useState<StrategyView | null>(null);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const cursor = useRef(0);
@@ -83,6 +85,7 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
           setCampaign(payload.campaign);
           setTranscript(payload.transcript);
           setSegments(payload.segments ?? []);
+          setStrategy(payload.strategy ?? null);
           if (payload.events.length > 0) {
             setEvents((previous) => [...previous, ...payload.events]);
             cursor.current = payload.events[payload.events.length - 1].id;
@@ -198,6 +201,14 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
             ))}
           </CardContent>
         </Card>
+      )}
+
+      {strategy && (
+        <StrategyPanel
+          campaignId={campaignId}
+          strategy={strategy}
+          awaitingApproval={campaign.status === 'awaiting_strategy_approval'}
+        />
       )}
 
       <Card>

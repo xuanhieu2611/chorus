@@ -31,27 +31,39 @@ export async function GET(
   if (error) return Response.json({ error: error.message }, { status: 500 });
   if (!campaign) return Response.json({ error: 'Campaign not found.' }, { status: 404 });
 
-  // The transcript itself is up to a megabyte of text and nothing on the
-  // dashboard renders it, so the snapshot carries only proof that it exists.
-  const { data: transcript } = await db()
-    .from('transcripts')
-    .select('language, provider, created_at, words')
-    .eq('campaign_id', id)
-    .maybeSingle();
+  // These reads are independent. Start them together so the dashboard pays one
+  // database round-trip interval rather than four in series.
+  const [transcriptResult, segmentsResult, strategyResult, events] = await Promise.all([
+    // The transcript itself is up to a megabyte of text and nothing on the
+    // dashboard renders it, so the snapshot carries only proof that it exists.
+    db()
+      .from('transcripts')
+      .select('language, provider, created_at, words')
+      .eq('campaign_id', id)
+      .maybeSingle(),
+    // There are at most 20 segments and they only change when analysis re-runs.
+    db()
+      .from('segments')
+      .select(
+        'id, start_time, end_time, topic, summary, content_type, energy, standalone_score, novelty_score, potential_hooks, context_deps',
+      )
+      .eq('campaign_id', id)
+      .order('start_time', { ascending: true }),
+    db()
+      .from('strategies')
+      .select('id, version, rationale, selected_topics, rejected_topics, planned_assets, approved_by, created_at')
+      .eq('campaign_id', id)
+      .order('version', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    readEventsSince(id, Number.isFinite(cursor) ? cursor : 0),
+  ]);
 
-  // Segments are sent whole rather than behind a cursor: there are at most 20 of
-  // them and they only change when `analyze` re-runs, so the simple thing is also
-  // the cheap thing. `transcript` is excluded because a segment's source text is
-  // the part the UI actually shows.
-  const { data: segments } = await db()
-    .from('segments')
-    .select(
-      'id, start_time, end_time, topic, summary, content_type, energy, standalone_score, novelty_score, potential_hooks, context_deps',
-    )
-    .eq('campaign_id', id)
-    .order('start_time', { ascending: true });
+  const secondaryError = transcriptResult.error ?? segmentsResult.error ?? strategyResult.error;
+  if (secondaryError) return Response.json({ error: secondaryError.message }, { status: 500 });
 
-  const events = await readEventsSince(id, Number.isFinite(cursor) ? cursor : 0);
+  const transcript = transcriptResult.data;
+  const segments = segmentsResult.data;
 
   return Response.json({
     campaign,
@@ -64,6 +76,7 @@ export async function GET(
         }
       : null,
     segments: segments ?? [],
+    strategy: strategyResult.data,
     events,
     cursor: events.length > 0 ? events[events.length - 1].id : cursor,
   });

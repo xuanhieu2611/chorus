@@ -2,7 +2,7 @@
 
 Companion to `PRD.md`. The PRD says *what* and *why*. This document says *what exactly gets built, with which tools, in which order*.
 
-**Status:** Phase 2 complete, Phase 3 next
+**Status:** Phase 3 complete, Phase 4 next
 **Last updated:** 2026-08-09
 
 ---
@@ -835,9 +835,13 @@ Map-reduce analysis. Segments table populated. A basic segment list in the UI.
 
 Boundaries are code's, not the model's. `snapToWords` pulls every proposed span onto real word edges and clamps it inside the transcript, `dropDuplicates` removes anything overlapping a stronger segment by more than 60% of the shorter span, and the cap keeps the strongest 20 rather than the first 20. `scripts/verify-analysis.ts` forces the multi-window path on a short clip (`windowSeconds` override, same precedent as `TranscribeOptions.chunkSeconds`), because at the production 480 s window a test clip is one window and the interesting half of the agent never runs.
 
-### Phase 3 - Strategist, Director, first gate
+### Phase 3 - Strategist, Director, first gate ✅
 Strategy generation with code-enforced budget validation. Director review with its `REJECT` to `strategize` loop. Strategy approval gate and resume-from-gate.
 **Done:** a plan appears with rejected topics and reasons, you approve it in the browser, and the worker resumes.
+
+**Built.** `lib/agents/strategist.ts`, `lib/agents/director.ts`, the versioned strategy tools, all three Phase 3 graph nodes, the approval route, and the dashboard strategy panel. Runtime validation owns fixed credit costs, the total budget, enabled platforms, stable plan keys, real segment ids, the asset cap, and clip duration. A schema-valid plan that breaks one of those relationships gets one retry with the exact violations.
+
+Paid decisions are resumable. A saved strategy with no revision request is reused after a crash, and the Director's successful `agent_runs.output` is the durable review record. Director and human rejections create a new strategy version; `replan_count` is advanced in code and capped before another model call. The gate route writes human feedback before requeueing and sets the resume node explicitly: approval goes to `produce`, while a change request goes to `strategize`. Merely setting `status = 'queued'` would re-enter the gate forever.
 
 ### Phase 4 - Writing Agent
 Text assets end to end, with grounding verification. Asset cards.

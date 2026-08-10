@@ -1,6 +1,9 @@
 import { mkdir, stat } from 'node:fs/promises';
+import { reviewStrategy } from '@/lib/agents/director';
 import { analyzeSource } from '@/lib/agents/source-analyst';
+import { createStrategy } from '@/lib/agents/strategist';
 import { emit } from '@/lib/events';
+import { env } from '@/lib/env';
 import { chargeCampaign } from '@/lib/llm/budget';
 import { extractAudio, probe } from '@/lib/media/ffmpeg';
 import {
@@ -11,9 +14,16 @@ import {
 import { PROVIDER, transcribeAudio } from '@/lib/media/transcribe';
 import {
   countSegments,
+  getDirectorReview,
+  getLatestStrategy,
+  getRevisionRequest,
+  getSegments,
   getTranscript,
   hasTranscript,
+  markStrategyApproved,
+  planFromStrategy,
   saveSegments,
+  saveStrategy,
   saveTranscript,
 } from '@/lib/tools';
 import type { NodeFn, NodeId, NodeResult } from '@/lib/graph/types';
@@ -22,10 +32,11 @@ import type { NodeFn, NodeId, NodeResult } from '@/lib/graph/types';
  * One function per node. Control flow lives here; the executor in
  * `lib/graph/run.ts` only walks the edges these functions return.
  *
- * Built so far: `ingest` and `transcribe` (Phase 1), `analyze` (Phase 2). Nodes
- * for later phases are absent from the registry rather than stubbed, and
- * `run.ts` stops cleanly when it reaches one. A stub that returns a plausible-looking empty result is worse
- * than a missing entry: it makes an unbuilt phase look like a working one.
+ * Built so far: `ingest` and `transcribe` (Phase 1), `analyze` (Phase 2), and
+ * `strategize`, `director_review_plan`, and `await_strategy_approval` (Phase 3).
+ * Nodes for later phases are absent from the registry rather than stubbed, and
+ * `run.ts` stops cleanly when it reaches one. A plausible empty stub is worse
+ * than a missing entry because it makes an unbuilt phase look complete.
  */
 
 /**
@@ -255,12 +266,149 @@ const analyze: NodeFn = async (ctx): Promise<NodeResult> => {
   };
 };
 
+/**
+ * Content Strategist: turn the scored segment pool into a versioned, constrained
+ * campaign plan. A saved plan is reused after a crash unless a Director or human
+ * explicitly asked for changes, so resumption never pays for the same plan twice.
+ */
+const strategize: NodeFn = async (ctx): Promise<NodeResult> => {
+  const { campaign, campaignId } = ctx;
+  const latest = await getLatestStrategy(campaignId);
+  const revision = latest ? await getRevisionRequest(campaignId, latest) : null;
+
+  if (latest && !revision) {
+    return {
+      next: 'director_review_plan',
+      reason: `Reusing strategy v${latest.version} from an earlier run; no review has requested a replacement.`,
+    };
+  }
+
+  const segments = await getSegments(campaignId);
+  if (segments.length < 2) {
+    throw new Error(
+      `The Strategist needs at least two source segments to build a portfolio; analysis produced ${segments.length}.`,
+    );
+  }
+
+  const maxAssets = Math.min(campaign.max_assets, env.maxAssets);
+  const plan = await createStrategy({
+    campaignId,
+    segments,
+    goal: campaign.goal,
+    audience: campaign.audience,
+    brandVoice: campaign.brand_voice,
+    platforms: campaign.platforms,
+    creditBudget: campaign.credit_budget,
+    maxAssets,
+    maxVideoSeconds: campaign.max_video_seconds,
+    requiredChanges: revision?.requiredChanges,
+  });
+
+  const saved = await saveStrategy(campaignId, (latest?.version ?? 0) + 1, plan);
+  const totalCredits = plan.planned_assets.reduce((sum, asset) => sum + asset.credits, 0);
+
+  await emit({
+    campaignId,
+    agent: 'content_strategist',
+    node: 'strategize',
+    level: 'info',
+    message: `Strategy v${saved.version} selects ${plan.planned_assets.length} assets and rejects ${plan.rejected_topics.length} topics.`,
+    data: {
+      strategy_id: saved.id,
+      version: saved.version,
+      assets: plan.planned_assets.length,
+      credits: totalCredits,
+      revision_source: revision?.source ?? null,
+    },
+  });
+
+  return {
+    next: 'director_review_plan',
+    reason: `Planned ${plan.planned_assets.length} assets for ${totalCredits} of ${campaign.credit_budget} credits, with ${plan.rejected_topics.length} explicit rejection${plan.rejected_topics.length === 1 ? '' : 's'}.`,
+  };
+};
+
+/**
+ * Content Director: one objective-focused review. The structured agent run is
+ * durable memory, so restarting this node reuses the paid decision. TypeScript
+ * owns the replan limit and edge selection.
+ */
+const directorReviewPlan: NodeFn = async (ctx): Promise<NodeResult> => {
+  const { campaign, campaignId } = ctx;
+  const strategy = await getLatestStrategy(campaignId);
+  if (!strategy) throw new Error('Director review reached without a saved strategy.');
+
+  const plan = planFromStrategy(strategy);
+  const prior = await getDirectorReview(campaignId, strategy);
+  const review =
+    prior?.review ??
+    (await reviewStrategy({
+      campaignId,
+      strategyVersion: strategy.version,
+      strategy: plan,
+      goal: campaign.goal,
+      audience: campaign.audience,
+      brandVoice: campaign.brand_voice,
+    }));
+
+  if (review.decision === 'APPROVE') {
+    await markStrategyApproved(strategy.id, 'director');
+    return {
+      next: 'await_strategy_approval',
+      reason: `Director approved strategy v${strategy.version}: ${review.reasoning}`,
+    };
+  }
+
+  // Version N exists after N-1 replans. If replan_count already reaches this
+  // version, this exact rejection was counted before a crash and only its edge
+  // remains to be traversed. Otherwise consume one replan if one is available.
+  if (campaign.replan_count >= strategy.version) {
+    return {
+      next: 'strategize',
+      reason: `Resuming the Director's rejection of strategy v${strategy.version}: ${review.required_changes.join(' ')}`,
+    };
+  }
+
+  if (campaign.replan_count < env.maxCampaignReplans) {
+    const nextCount = campaign.replan_count + 1;
+    return {
+      next: 'strategize',
+      patch: { replan_count: nextCount },
+      reason: `Director rejected strategy v${strategy.version} and requested replan ${nextCount} of ${env.maxCampaignReplans}: ${review.required_changes.join(' ')}`,
+    };
+  }
+
+  await emit({
+    campaignId,
+    agent: 'content_director',
+    node: 'director_review_plan',
+    level: 'warn',
+    message: `Director rejected strategy v${strategy.version}, but the campaign has used all ${env.maxCampaignReplans} replans.`,
+    data: { required_changes: review.required_changes },
+  });
+  return {
+    next: 'finalize',
+    reason: `Director rejected strategy v${strategy.version}, and no replans remain. The campaign will finalize without producing this rejected plan.`,
+  };
+};
+
+/** Human gate. Approval and change requests are handled by the route, which
+ * chooses the resume node before putting the campaign back on the worker queue. */
+const awaitStrategyApproval: NodeFn = async (): Promise<NodeResult> => ({
+  next: null,
+  patch: { status: 'awaiting_strategy_approval' },
+  reason: 'Strategy passed Director review and is waiting for human approval before production spends more credits.',
+});
+
 /** The registry the executor walks. Later phases add their nodes here and to the
  * mermaid diagram in `MVP.md` section 6 in the same commit. */
 export const NODES: Partial<Record<NodeId, NodeFn>> = {
   ingest,
   transcribe,
   analyze,
+  strategize,
+  director_review_plan: directorReviewPlan,
+  await_strategy_approval: awaitStrategyApproval,
 };
 
 async function assertReadable(path: string): Promise<void> {
