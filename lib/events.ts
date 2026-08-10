@@ -1,7 +1,8 @@
 import { db, type AgentEventRow } from '@/lib/db/client';
 import type { Json } from '@/lib/db/database.types';
+import type { EventLevel } from '@/lib/events/types';
 
-export type EventLevel = 'info' | 'decision' | 'tool' | 'warn' | 'error';
+export type { CampaignEvent, EventLevel } from '@/lib/events/types';
 
 export interface EmitInput {
   campaignId: string;

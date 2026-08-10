@@ -2,7 +2,7 @@
 
 Companion to `PRD.md`. The PRD says *what* and *why*. This document says *what exactly gets built, with which tools, in which order*.
 
-**Status:** Phase 7 complete, Phase 8 next
+**Status:** Phase 8 complete, Phase 9 next
 **Last updated:** 2026-08-10
 
 ---
@@ -419,17 +419,17 @@ flowchart TD
 
     produce --> critique[critique<br/>CONTENT CRITIC]
 
-    critique -->|PASS| more{assets remaining?}
+    critique -->|PASS| more_assets{assets remaining?}
     critique -->|REVISE, under limit| produce
     critique -->|REVISE, at limit| abandon[abandon asset]
     critique -->|REJECT| swap[select_alternative<br/>STRATEGIST picks new segment]
 
     swap -->|alternative found| produce
     swap -->|none left| abandon
-    abandon --> more
+    abandon --> more_assets
 
-    more -->|yes| produce
-    more -->|no| creview{campaign_review<br/>CAMPAIGN REVIEWER}
+    more_assets -->|yes| produce
+    more_assets -->|no| creview{campaign_review<br/>CAMPAIGN REVIEWER}
 
     creview -->|REPLAN, under limit| replan[replan<br/>STRATEGIST revises plan]
     creview -->|REPLAN, at limit| gate2
@@ -447,7 +447,7 @@ flowchart TD
     class analyze,strategize,produce,critique,swap,replan agent
     class dirplan,creview agent
     class gate1,gate2 gate
-    class ingest,transcribe,abandon,more,finalize mech
+    class ingest,transcribe,abandon,more_assets,finalize mech
 ```
 
 ### Node contract
@@ -802,7 +802,7 @@ Use `@xyflow/react` with hardcoded node positions. No layout engine; the graph i
 
 **`/campaigns/[id]/review`** - Final package. Video cards with an inline `<video>` player, hook, caption, quality score, and source timestamp. Written assets in platform-styled previews. Campaign scorecard. **Download campaign** hits `/api/export`, which zips clips plus a `campaign.md`.
 
-**Live updates.** `useEventStream(campaignId)` opens an `EventSource` against `/api/campaigns/[id]/events`. The handler polls `agent_events` where `id > cursor` every 750 ms and streams new rows. Reconnect passes `?cursor=` so nothing is missed across a refresh. Poll-over-SSE is deliberate: it is roughly 30 lines, has no extra dependency, and survives the worker crashing.
+**Live updates.** `useEventStream(campaignId)` loads the existing snapshot once, then opens an `EventSource` against `/api/campaigns/[id]/events`. The handler polls `agent_events` where `id > cursor` every 750 ms and streams new rows. Reconnect passes the latest `?cursor=` and snapshot refreshes after events keep cards and gates current, so nothing is missed across a refresh. Poll-over-SSE is deliberate: it has no extra dependency and survives the worker crashing.
 
 ---
 
@@ -823,7 +823,7 @@ Upload route streaming to disk. `ingest` node (ffprobe, audio extraction). `tran
 
 **Built.** The graph executor (`lib/graph/run.ts`) landed with it, since `ingest` and `transcribe` are the first two nodes and the worker's Phase 0 seam was where it plugged in. Both media paths were exercised end to end on real speech: a video source (`has_video_stream = true`) and an MP3 (`false`). Beyond the unit tests, `scripts/verify-chunking.ts` transcribes one real file both whole and chunked and compares the timelines, which is what proves the merge arithmetic is wired to the actual slicing. The ceiling was verified by running a campaign under `CAMPAIGN_COST_CEILING_USD=0.0001`: the run failed at `transcribe`, kept the transcript it had already paid for, and resuming it afterwards skipped straight past transcription without spending again.
 
-Two things this phase added that are not in the list above: a minimal `/campaigns/[id]` dashboard polling `GET /api/campaigns/[id]` on an event cursor (Phase 8 swaps the poll for SSE and keeps the contract), and the unbuilt-node frontier described in `docs/ARCHITECTURE.md`.
+Two things this phase added that are not in the list above: a minimal `/campaigns/[id]` dashboard using `GET /api/campaigns/[id]` as its snapshot contract (Phase 8 now layers SSE on that contract), and the unbuilt-node frontier described in `docs/ARCHITECTURE.md`.
 
 ### Phase 2 - Source Analyst ✅
 Map-reduce analysis. Segments table populated. A basic segment list in the UI.
@@ -877,9 +877,11 @@ Cross-asset review, forced replan under diversity 60, replacement asset generati
 
 Campaign Reviewer rows and Critic revision rows have unique idempotency keys. The final approval route resumes at `finalize` after approval, which remains intentionally unbuilt until Phase 9; a final change request writes durable feedback before resuming at `replan`.
 
-### Phase 8 - Live graph and timeline
+### Phase 8 - Live graph and timeline ✅
 `AgentGraph` with live node states and animated loop-back edges. Timeline filtering. Collapsible tool logs.
 **Done:** a full run is legible from the graph alone, with no console open.
+
+**Built.** `app/api/campaigns/[id]/events/route.ts` streams the monotonic `agent_events` cursor with a 750 ms server-side poll. `components/useEventStream.ts` backfills the snapshot, reconnects from the last event id, and refreshes durable campaign state after each event. `AgentGraph` renders the section 6 node set with fixed positions, state colors, an agent roster, and persistent animated loop-back edges when a decision event traverses one. `AgentTimeline` defaults to reverse chronology, supports chronological order and agent filtering, and keeps tool payloads collapsed. The existing `finalize` frontier is rendered as skipped when Phase 7 parks there; Phase 9 remains unimplemented.
 
 ### Phase 9 - Export and polish
 Zip export with `campaign.md`. Empty, loading, and failure states. Failure recovery from any node. README with the architecture diagram. Record the demo.

@@ -1,140 +1,36 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
-import { StrategyPanel, type StrategyView } from '@/components/StrategyPanel';
-import { AssetCard, type AssetView } from '@/components/AssetCard';
+import { AgentGraph } from '@/components/AgentGraph';
+import { AgentTimeline } from '@/components/AgentTimeline';
+import { StrategyPanel } from '@/components/StrategyPanel';
+import { AssetCard } from '@/components/AssetCard';
 import { ApprovalGate } from '@/components/ApprovalGate';
-import { CampaignReviewCard, type CampaignReviewView } from '@/components/CampaignReviewCard';
-
-/**
- * Live view of one campaign.
- *
- * Polls the snapshot route with an event cursor: `agent_events.id` is a
- * monotonic bigint, so each request asks only for rows newer than the last one
- * it saw and a refresh cannot drop or duplicate a line. Phase 8 swaps the poll
- * for the SSE route and keeps this exact cursor contract.
- */
-
-interface CampaignSnapshot {
-  id: string;
-  title: string | null;
-  goal: string;
-  status: string;
-  current_node: string | null;
-  source_duration_sec: number | null;
-  has_video_stream: boolean | null;
-  cost_usd: number | string;
-  credits_spent: number;
-  credit_budget: number;
-  error: string | null;
-}
-
-interface EventRow {
-  id: number;
-  agent: string;
-  node: string | null;
-  level: 'info' | 'decision' | 'tool' | 'warn' | 'error';
-  message: string;
-  created_at: string;
-}
-
-interface ReviewRow {
-  id: string;
-  asset_id: string;
-  reviewer_agent: string;
-  scores: unknown;
-  feedback: string;
-  decision: 'PASS' | 'REVISE' | 'REJECT';
-  revision_index: number;
-  created_at: string;
-}
-
-interface TranscriptSummary {
-  language: string | null;
-  provider: string;
-  word_count: number;
-}
-
-interface SegmentRow {
-  id: string;
-  start_time: number | string;
-  end_time: number | string;
-  topic: string;
-  summary: string | null;
-  content_type: string;
-  energy: number | string | null;
-  standalone_score: number | string | null;
-  novelty_score: number | string | null;
-  potential_hooks: string[];
-  context_deps: string | null;
-}
-
-const TERMINAL = ['complete', 'failed', 'cancelled'];
-const POLL_MS = 1_500;
+import { CampaignReviewCard } from '@/components/CampaignReviewCard';
+import { useEventStream } from '@/components/useEventStream';
 
 export function CampaignMonitor({ campaignId }: { campaignId: string }) {
-  const [campaign, setCampaign] = useState<CampaignSnapshot | null>(null);
-  const [transcript, setTranscript] = useState<TranscriptSummary | null>(null);
-  const [segments, setSegments] = useState<SegmentRow[]>([]);
-  const [strategy, setStrategy] = useState<StrategyView | null>(null);
-  const [campaignReview, setCampaignReview] = useState<CampaignReviewView | null>(null);
-  const [assets, setAssets] = useState<AssetView[]>([]);
-  const [events, setEvents] = useState<EventRow[]>([]);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const cursor = useRef(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-
-    async function poll() {
-      try {
-        const response = await fetch(`/api/campaigns/${campaignId}?cursor=${cursor.current}`);
-        const payload = await response.json();
-        if (cancelled) return;
-
-        if (!response.ok) {
-          setLoadError(payload.error ?? `Request failed with status ${response.status}.`);
-        } else {
-          setLoadError(null);
-          setCampaign(payload.campaign);
-          setTranscript(payload.transcript);
-          setSegments(payload.segments ?? []);
-          setStrategy(payload.strategy ?? null);
-          setCampaignReview(payload.campaign_review ?? null);
-          const nextReviews = (payload.reviews ?? []) as ReviewRow[];
-          setAssets(
-            (payload.assets ?? []).map((asset: AssetView) => ({
-              ...asset,
-              reviews: nextReviews.filter((review) => review.asset_id === asset.id),
-            })),
-          );
-          if (payload.events.length > 0) {
-            setEvents((previous) => [...previous, ...payload.events]);
-            cursor.current = payload.events[payload.events.length - 1].id;
-          }
-          // Stop polling once the worker is done; nothing more will arrive until
-          // a human action requeues the campaign.
-          if (TERMINAL.includes(payload.campaign.status)) return;
-        }
-      } catch (error) {
-        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error));
-      }
-      if (!cancelled) timer = setTimeout(poll, POLL_MS);
-    }
-
-    void poll();
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [campaignId]);
+  const stream = useEventStream(campaignId);
+  const { campaign, transcript, segments, strategy, campaignReview, assets, events } = stream;
 
   if (!campaign) {
-    return <p className="text-muted-foreground text-sm">{loadError ?? 'Loading campaign…'}</p>;
+    if (stream.status === 'error') {
+      return (
+        <div className="flex flex-col items-start gap-3">
+          <p className="text-destructive text-sm">{stream.error ?? 'Could not load this campaign.'}</p>
+          <button
+            type="button"
+            onClick={stream.retry}
+            className="border-border hover:bg-muted rounded-md border px-3 py-1.5 text-sm"
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return <p className="text-muted-foreground text-sm">Loading campaign…</p>;
   }
 
   return (
@@ -184,6 +80,16 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
           {campaign.error}
         </p>
       )}
+
+      <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.12fr)_minmax(360px,0.88fr)]">
+        <AgentGraph campaign={campaign} events={events} />
+        <AgentTimeline
+          events={events}
+          connectionStatus={stream.status}
+          connectionError={stream.error}
+          onRetry={stream.retry}
+        />
+      </div>
 
       {segments.length > 0 && (
         <Card>
@@ -264,34 +170,9 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
         <ApprovalGate campaignId={campaignId} gate="final" />
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Activity</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col">
-          {events.length === 0 && (
-            <p className="text-muted-foreground text-sm">
-              Waiting for a worker to claim this campaign. Is <code>npm run worker</code> running?
-            </p>
-          )}
-          {events.map((event, index) => (
-            <div key={event.id}>
-              {index > 0 && <Separator />}
-              <div className="flex items-baseline gap-3 py-2">
-                <span className="text-muted-foreground w-16 shrink-0 font-mono text-[11px]">
-                  {new Date(event.created_at).toLocaleTimeString('en-US', { hour12: false })}
-                </span>
-                <span className={`w-16 shrink-0 font-mono text-[11px] ${levelColor(event.level)}`}>
-                  {event.level}
-                </span>
-                <span className="text-sm">{event.message}</span>
-              </div>
-            </div>
-          ))}
-        </CardContent>
-      </Card>
-
-      {loadError && <p className="text-muted-foreground text-xs">Reconnecting: {loadError}</p>}
+      {stream.error && stream.status !== 'connected' && (
+        <p className="text-muted-foreground text-xs">{stream.error}</p>
+      )}
     </div>
   );
 }
@@ -309,21 +190,6 @@ function statusVariant(status: string): 'default' | 'secondary' | 'destructive' 
   if (status === 'failed' || status === 'cancelled') return 'destructive';
   if (status === 'complete') return 'default';
   return 'secondary';
-}
-
-function levelColor(level: EventRow['level']): string {
-  switch (level) {
-    case 'error':
-      return 'text-destructive';
-    case 'warn':
-      return 'text-amber-500';
-    case 'decision':
-      return 'text-sky-500';
-    case 'tool':
-      return 'text-muted-foreground';
-    default:
-      return 'text-muted-foreground';
-  }
 }
 
 /** Segment boundaries as mm:ss, so they can be checked against the audio by hand. */

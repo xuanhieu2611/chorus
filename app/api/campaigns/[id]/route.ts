@@ -4,10 +4,10 @@ import { readEventsSince } from '@/lib/events';
 /**
  * Full state snapshot for the dashboard.
  *
- * `?cursor=` returns only events newer than that id, so the page can poll
- * cheaply without re-sending the whole timeline. `agent_events.id` is a
- * monotonic bigint for exactly this reason. Phase 8 replaces the polling with
- * the SSE route; the cursor contract is the same either way.
+ * `?cursor=` returns only events newer than that id, so the live dashboard can
+ * backfill or refresh cheaply without re-sending the whole timeline.
+ * `agent_events.id` is a monotonic bigint for exactly this reason. Phase 8's
+ * SSE route uses the same snapshot and cursor contract.
  *
  * The browser never holds database credentials: this handler runs server-side
  * with the service role key and returns only what the UI needs.

@@ -1,8 +1,8 @@
 # Chorus architecture
 
-Mirrors `MVP.md` section 6. **Changing `lib/graph/nodes.ts` means updating this diagram in the same commit**, and `components/AgentGraph.tsx` renders the same node set live.
+Mirrors `MVP.md` section 6. **Changing `lib/graph/nodes.ts` means updating this diagram in the same commit**, and `components/AgentGraph.tsx` renders the same node set live from the fixed display definition in `lib/graph/view.ts`.
 
-**Build state:** Phase 7 complete. The executor runs through both human gates, produces one asset at a time, critiques it, revises or replaces it when needed, reviews the passing portfolio, and parks at the unbuilt `finalize` frontier for Phase 9.
+**Build state:** Phase 8 complete. The executor runs through both human gates, produces one asset at a time, critiques it, revises or replaces it when needed, reviews the passing portfolio, and parks at the unbuilt `finalize` frontier for Phase 9. The dashboard now shows that state live through the graph and timeline.
 
 ---
 
@@ -38,17 +38,17 @@ flowchart TD
 
     produce --> critique[critique<br/>CONTENT CRITIC]
 
-    critique -->|PASS| more{assets remaining?}
+    critique -->|PASS| more_assets{assets remaining?}
     critique -->|REVISE, under limit| produce
     critique -->|REVISE, at limit| abandon[abandon asset]
     critique -->|REJECT| swap[select_alternative<br/>STRATEGIST picks new segment]
 
     swap -->|alternative found| produce
     swap -->|none left| abandon
-    abandon --> more
+    abandon --> more_assets
 
-    more -->|yes| produce
-    more -->|no| creview{campaign_review<br/>CAMPAIGN REVIEWER}
+    more_assets -->|yes| produce
+    more_assets -->|no| creview{campaign_review<br/>CAMPAIGN REVIEWER}
 
     creview -->|REPLAN, under limit| replan[replan<br/>STRATEGIST revises plan]
     creview -->|REPLAN, at limit| gate2
@@ -66,7 +66,7 @@ flowchart TD
     class analyze,strategize,produce,critique,swap,replan agent
     class dirplan,creview agent
     class gate1,gate2 gate
-    class ingest,transcribe,abandon,more,finalize mech
+    class ingest,transcribe,abandon,more_assets,finalize mech
 ```
 
 LLMs decide content and scores at nodes. TypeScript decides which edge is taken. Every node returns `{ next, patch, reason }`.
@@ -112,6 +112,16 @@ Agents call `lib/tools/` and nothing else. No agent file imports the Supabase cl
 **Replans are new strategy versions, not in-place edits.** The Strategist receives the scorecard and replacement instructions. Kept assets retain their original plan keys, type, platform, and source segment ids. Each replacement gets a deterministic unique suffix such as `asset_3_v2`; the old passing row is conditionally moved to `replaced` before the new strategy is saved. A retry reuses the successful replan run and repeats those conditional transitions safely.
 
 **The final gate resumes explicitly.** Final approval queues `finalize`, while final change requests are written to `agent_events` before the campaign is requeued at `replan`. `finalize` is intentionally still unregistered, so Phase 7 does not pretend to implement Phase 9 packaging.
+
+## Phase 8 decisions
+
+**The browser has one durable cursor.** The SSE route queries `agent_events` with `id > cursor`, emits each row with its id, and sends a keep-alive frame every 750 ms. The browser closes a failed `EventSource` and opens a new one with the latest cursor, rather than relying on the browser's automatic reconnect URL, so a reconnect always names the current position. A failed database poll closes the stream and lets the same cursor path retry.
+
+**SSE carries events; the snapshot carries state.** The first `useEventStream` request uses the existing campaign snapshot contract and backfills the timeline. Each incoming event then triggers a cursor-based snapshot refresh, which keeps strategy versions, approval gates, review rows, assets, and media URLs in sync without putting database credentials in the browser. This is still poll-over-SSE, not Supabase Realtime: the worker and Next.js process remain independent.
+
+**The graph is a fixed map, not a layout result.** `lib/graph/view.ts` mirrors the section 6 Mermaid graph with hardcoded positions and edges. `more_assets` is a display-only decision because the executor resolves that branch inside `produce`, `critique`, and `abandon_asset`; it is derived from the corresponding decision events and does not become a graph node or a Phase 9 stub in the machine. `current_node` drives the active state, `Entering` events establish completed nodes, and decision events mark traversed edges. Loop-back edges stay animated after traversal so a revision, replan, or change request remains visible in the run history.
+
+**Timeline detail is progressive.** The timeline renders newest-first by default, can switch to oldest-first, filters by the event's agent, and uses closed `details` elements for tool events. The graph's skipped state is reserved for the known unbuilt `finalize` frontier, while a worker error marks the current node failed.
 
 ## Phase 4 decisions
 
