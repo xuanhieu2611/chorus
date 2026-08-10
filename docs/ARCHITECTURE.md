@@ -2,7 +2,7 @@
 
 Mirrors `MVP.md` section 6. **Changing `lib/graph/nodes.ts` means updating this diagram in the same commit**, and `components/AgentGraph.tsx` renders the same node set live from the fixed display definition in `lib/graph/view.ts`.
 
-**Build state:** Phase 8 complete. The executor runs through both human gates, produces one asset at a time, critiques it, revises or replaces it when needed, reviews the passing portfolio, and parks at the unbuilt `finalize` frontier for Phase 9. The dashboard now shows that state live through the graph and timeline.
+**Build state:** Phase 9 complete. The executor runs through both human gates, produces one asset at a time, critiques it, revises or replaces it when needed, reviews the passing portfolio, validates and finalizes the package, and exposes a streaming export route. The dashboard and final review show durable loading, empty, failure, and recovery states.
 
 ---
 
@@ -111,7 +111,7 @@ Agents call `lib/tools/` and nothing else. No agent file imports the Supabase cl
 
 **Replans are new strategy versions, not in-place edits.** The Strategist receives the scorecard and replacement instructions. Kept assets retain their original plan keys, type, platform, and source segment ids. Each replacement gets a deterministic unique suffix such as `asset_3_v2`; the old passing row is conditionally moved to `replaced` before the new strategy is saved. A retry reuses the successful replan run and repeats those conditional transitions safely.
 
-**The final gate resumes explicitly.** Final approval queues `finalize`, while final change requests are written to `agent_events` before the campaign is requeued at `replan`. `finalize` is intentionally still unregistered, so Phase 7 does not pretend to implement Phase 9 packaging.
+**The final gate resumes explicitly.** Final approval queues `finalize`, while final change requests are written to `agent_events` before the campaign is requeued at `replan`. During Phase 7, `finalize` was intentionally unregistered; Phase 9 now registers the real packaging validation node.
 
 ## Phase 8 decisions
 
@@ -121,7 +121,7 @@ Agents call `lib/tools/` and nothing else. No agent file imports the Supabase cl
 
 **The graph is a fixed map, not a layout result.** `lib/graph/view.ts` mirrors the section 6 Mermaid graph with hardcoded positions and edges. `more_assets` is a display-only decision because the executor resolves that branch inside `produce`, `critique`, and `abandon_asset`; it is derived from the corresponding decision events and does not become a graph node or a Phase 9 stub in the machine. `current_node` drives the active state, `Entering` events establish completed nodes, and decision events mark traversed edges. Loop-back edges stay animated after traversal so a revision, replan, or change request remains visible in the run history.
 
-**Timeline detail is progressive.** The timeline renders newest-first by default, can switch to oldest-first, filters by the event's agent, and uses closed `details` elements for tool events. The graph's skipped state is reserved for the known unbuilt `finalize` frontier, while a worker error marks the current node failed.
+**Timeline detail is progressive.** The timeline renders newest-first by default, can switch to oldest-first, filters by the event's agent, and uses closed `details` elements for tool events. The graph's skipped state remains available for genuinely unbuilt future nodes, while a worker error marks the current node failed. `finalize` is complete when packaging validation succeeds.
 
 ## Phase 4 decisions
 
@@ -207,4 +207,14 @@ Two bugs in it were found by exercising it rather than by reading it, both worth
 
 **TypeScript 6, not 7.** `typescript-eslint` throws on load under TS 7.0 and takes `eslint-config-next` with it, so TS 7 means no linting at all. `MVP.md` section 2 has the full reasoning. The TS 7 constraints are still observed (no `baseUrl`, `moduleResolution: bundler`) so going back is a version bump.
 
-**Claim semantics.** `claim_campaign` moves the row out of `'queued'` immediately, because `'queued'` is the only signal that a campaign is unclaimed. It sets `'ingesting'` provisionally; the executor overwrites `status` and `current_node` as it enters its first node, which for a resumed campaign is wherever it left off. Nothing reclaims a campaign whose worker died mid-run yet: heartbeats are written, but automatic stale-claim recovery is Phase 9.
+**Claim semantics.** `claim_campaign` moves the row out of `'queued'` immediately, because `'queued'` is the only signal that a campaign is unclaimed. It sets `'ingesting'` provisionally; the executor overwrites `status` and `current_node` as it enters its first node, which for a resumed campaign is wherever it left off. Phase 9 adds stale recovery in the same `for update skip locked` transaction: only active processing statuses with a heartbeat older than `STALE_CLAIM_AFTER_SECONDS` are eligible. Human gates and terminal states are never reclaimed. Heartbeats and failure writes include `claimed_by` fencing so a previous process cannot overwrite the worker that took over.
+
+## Phase 9 decisions
+
+**The final package is a code-enforced allowlist.** `lib/export.ts` selects assets whose status is exactly `passed`. Rejected, abandoned, replaced, planned, generating, revising, and needs-review rows are not export candidates. `finalize` validates that every selected row has content and that every clip has a durable local media path. The export route repeats the selection and validates media paths beneath `STORAGE_DIR`, then gives archiver file streams instead of reading clips into memory.
+
+**Review and export are separate concerns.** The final review page can show a campaign while it is awaiting final approval or recovering from failure. The ZIP endpoint returns a clear conflict until the `finalize` node has marked the campaign complete. This keeps a partially reviewed campaign from being mistaken for a shippable package.
+
+**Retry resumes the durable node.** A failed campaign keeps `current_node`; the retry route atomically changes only `failed` rows back to `queued`, clears the lease, and emits the recovery decision before the worker can claim it. Existing transcripts, successful structured runs, Critic rows, campaign reviews, and asset state transitions are reused by the graph's idempotency checks. A stale claim uses the same resume path without making human gates claimable.
+
+**The final UI states are explicit.** Dashboard and review routes have route-level loading and error boundaries, while client components distinguish initial loading, empty collections, live connection loss, failed campaigns, and recovery actions. A completed campaign links to the final review; a missing worker or failed node explains the next local action.

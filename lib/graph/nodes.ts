@@ -25,6 +25,7 @@ import { produceClip } from '@/lib/agents/clip-producer';
 import { writeAsset, type WrittenAssetType } from '@/lib/agents/writer';
 import { emit } from '@/lib/events';
 import { env } from '@/lib/env';
+import { exportAssetProblems, selectExportAssets } from '@/lib/export';
 import { chargeCampaign } from '@/lib/llm/budget';
 import { extractAudio, probe } from '@/lib/media/ffmpeg';
 import {
@@ -79,8 +80,8 @@ import type { NodeFn, NodeId, NodeResult } from '@/lib/graph/types';
  * `strategize`, `director_review_plan`, and the first gate (Phase 3), grounded
  * writing (Phase 4), the Clip Producer (Phase 5), and the Critic loop (Phase 6).
  * Phase 7 adds the Campaign Reviewer, the replan loop, and the final approval
- * gate. `finalize` stays absent from the registry until Phase 9 so a campaign
- * cannot claim that packaging exists before that phase is built.
+ * gate. Phase 9 adds the terminal finalize node; the HTTP export is streamed
+ * separately so a campaign can be packaged without buffering media in memory.
  */
 
 /**
@@ -1057,8 +1058,30 @@ const awaitFinalApproval: NodeFn = async (): Promise<NodeResult> => ({
   reason: 'The Campaign Reviewer has finished the portfolio scorecard and is waiting for final human approval.',
 });
 
-/** The registry the executor walks. `finalize` remains absent until Phase 9;
- * reaching it parks a truthful post-approval campaign. */
+/**
+ * Mark the campaign complete only after the final portfolio has a durable,
+ * exportable shape. The route performs the filesystem check again at download
+ * time because local media can be removed after the worker finishes.
+ */
+const finalize: NodeFn = async (ctx): Promise<NodeResult> => {
+  const assets = await getCampaignAssets(ctx.campaignId);
+  const selected = selectExportAssets(assets);
+  if (selected.length === 0) {
+    throw new Error('Finalize found no Critic-passed assets. The campaign cannot produce an empty final package.');
+  }
+  const problems = selected.flatMap((asset) =>
+    exportAssetProblems(asset).map((problem) => `${asset.plan_key}: ${problem}`),
+  );
+  if (problems.length > 0) throw new Error(`Finalize found incomplete assets: ${problems.join('; ')}`);
+
+  return {
+    next: null,
+    patch: { status: 'complete', error: null },
+    reason: `Finalized ${selected.length} Critic-passed asset${selected.length === 1 ? '' : 's'}; rejected, abandoned, replaced, and unfinished history stays out of the package.`,
+  };
+};
+
+/** The registry the executor walks. Every node named by the graph is now built. */
 export const NODES: Partial<Record<NodeId, NodeFn>> = {
   ingest,
   transcribe,
@@ -1073,6 +1096,7 @@ export const NODES: Partial<Record<NodeId, NodeFn>> = {
   campaign_review: campaignReview,
   replan,
   await_final_approval: awaitFinalApproval,
+  finalize,
 };
 
 const ACTIVE_ASSET_STATUSES = new Set(['planned', 'generating', 'revising', 'needs_review']);

@@ -5,6 +5,7 @@ import { emit } from '../lib/events';
 import { env } from '../lib/env';
 import { assertBudget, CostCeilingExceededError } from '../lib/llm/budget';
 import { runGraph } from '../lib/graph/run';
+import { CLAIMED_CAMPAIGN_STATUSES, ownsClaim } from '../lib/worker/recovery';
 
 loadEnv();
 
@@ -33,7 +34,10 @@ async function claim(): Promise<CampaignRow | null> {
   // claimed. It returned a composite type once, and a NULL composite reaches
   // PostgREST as a row of all-null columns, which reads as a successful claim of
   // a campaign with a null id. See migration 0003.
-  const { data, error } = await db().rpc('claim_campaign', { p_worker: WORKER_ID });
+  const { data, error } = await db().rpc('claim_campaign', {
+    p_worker: WORKER_ID,
+    p_stale_after_seconds: env.staleClaimAfterSeconds,
+  });
   if (error) throw new Error(`claim_campaign failed: ${error.message}`);
 
   const rows = (data ?? []) as CampaignRow[];
@@ -41,16 +45,18 @@ async function claim(): Promise<CampaignRow | null> {
 }
 
 /**
- * Proof of life while a campaign runs. Nothing reclaims a stale campaign yet;
- * automatic recovery from an abandoned claim is Phase 9 work. Until then the
- * column is the evidence you need to tell "stuck" from "still working".
+ * Proof of life while a campaign runs. The SQL claim function may reclaim a row
+ * only after this lease is stale. Every write below is fenced by claimed_by so a
+ * previous worker cannot overwrite the worker that safely reclaimed the row.
  */
 function startHeartbeat(campaignId: string): () => void {
   const timer = setInterval(async () => {
     const { error } = await db()
       .from('campaigns')
       .update({ heartbeat_at: new Date().toISOString() })
-      .eq('id', campaignId);
+      .eq('id', campaignId)
+      .eq('claimed_by', WORKER_ID)
+      .in('status', [...CLAIMED_CAMPAIGN_STATUSES]);
     if (error) console.error(`[worker] heartbeat failed: ${error.message}`);
   }, HEARTBEAT_INTERVAL_MS);
 
@@ -86,21 +92,33 @@ async function runCampaign(campaign: CampaignRow): Promise<void> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
-    await emit({
-      campaignId: campaign.id,
-      agent: 'worker',
-      node: campaign.current_node,
-      level: 'error',
-      message:
-        error instanceof CostCeilingExceededError
-          ? `Campaign halted on the cost ceiling: ${message}`
-          : `Campaign failed: ${message}`,
-    });
-
-    await db()
+    const { data: latest } = await db()
       .from('campaigns')
-      .update({ status: 'failed', error: message, updated_at: new Date().toISOString() })
-      .eq('id', campaign.id);
+      .select('current_node, claimed_by')
+      .eq('id', campaign.id)
+      .maybeSingle();
+    const failedNode = latest?.current_node ?? campaign.current_node;
+
+    if (!latest || ownsClaim(latest.claimed_by, WORKER_ID)) {
+      await emit({
+        campaignId: campaign.id,
+        agent: 'worker',
+        node: failedNode,
+        level: 'error',
+        message:
+          error instanceof CostCeilingExceededError
+            ? `Campaign halted on the cost ceiling: ${message}`
+            : `Campaign failed: ${message}`,
+      });
+
+      await db()
+        .from('campaigns')
+        .update({ status: 'failed', error: message, updated_at: new Date().toISOString() })
+        .eq('id', campaign.id)
+        .eq('claimed_by', WORKER_ID);
+    } else {
+      console.error(`[worker] claim for ${campaign.id} was fenced while handling ${failedNode ?? 'entry'}; leaving the new worker in control.`);
+    }
   } finally {
     stopHeartbeat();
   }

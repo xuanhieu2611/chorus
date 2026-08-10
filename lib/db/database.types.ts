@@ -512,7 +512,7 @@ export type Database = {
       }
       begin_asset_revision: { Args: { p_asset_id: string }; Returns: number }
       claim_campaign: {
-        Args: { p_worker: string }
+        Args: { p_stale_after_seconds?: number; p_worker: string }
         Returns: {
           audience: string | null
           brand_voice: string | null

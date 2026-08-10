@@ -86,12 +86,16 @@ export function StrategyPanel({
               Deliberately rejected
             </h3>
             <div className="flex flex-col gap-2">
-              {strategy.rejected_topics.map((item, index) => (
+              {strategy.rejected_topics.length > 0 ? strategy.rejected_topics.map((item, index) => (
                 <div key={`${item.topic}-${index}`} className="rounded-lg border border-rose-500/20 p-3">
                   <p className="text-sm font-medium">{item.topic}</p>
                   <p className="text-muted-foreground mt-1.5 text-xs">{item.reason}</p>
                 </div>
-              ))}
+              )) : (
+                <p className="text-muted-foreground rounded-lg border border-dashed p-3 text-sm">
+                  No topics were rejected in this strategy version.
+                </p>
+              )}
             </div>
           </section>
         </div>

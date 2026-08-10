@@ -9,6 +9,8 @@ import { StrategyPanel } from '@/components/StrategyPanel';
 import { AssetCard } from '@/components/AssetCard';
 import { ApprovalGate } from '@/components/ApprovalGate';
 import { CampaignReviewCard } from '@/components/CampaignReviewCard';
+import { RetryCampaignButton } from '@/components/RetryCampaignButton';
+import Link from 'next/link';
 import { useEventStream } from '@/components/useEventStream';
 
 export function CampaignMonitor({ campaignId }: { campaignId: string }) {
@@ -46,6 +48,11 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
           )}
         </div>
         <p className="text-muted-foreground text-sm">{campaign.goal}</p>
+        {campaign.status === 'complete' && (
+          <Link href={`/campaigns/${campaignId}/review`} className="text-primary w-fit text-sm underline-offset-4 hover:underline">
+            Open final campaign review →
+          </Link>
+        )}
       </div>
 
       <Card>
@@ -75,9 +82,28 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
         </CardContent>
       </Card>
 
-      {campaign.error && (
+      {campaign.status === 'failed' ? (
+        <Card className="border-destructive/40 bg-destructive/5">
+          <CardHeader>
+            <CardTitle className="text-base">Campaign stopped at {campaign.current_node ?? 'the entry point'}</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <p className="text-destructive text-sm">{campaign.error ?? 'The worker reported a failure without details.'}</p>
+            <p className="text-muted-foreground text-xs">
+              Retry resumes from the durable node position. Existing transcript, agent decisions, and saved asset output are checked before paid work runs again.
+            </p>
+            <RetryCampaignButton campaignId={campaignId} />
+          </CardContent>
+        </Card>
+      ) : campaign.error ? (
         <p className="text-destructive border-destructive/40 bg-destructive/5 rounded-md border px-3 py-2 text-sm">
           {campaign.error}
+        </p>
+      ) : null}
+
+      {campaign.status === 'awaiting_final_approval' && (
+        <p className="text-muted-foreground rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm">
+          The portfolio review is complete. Resolve the final approval gate below to queue packaging.
         </p>
       )}
 
@@ -91,7 +117,7 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
         />
       </div>
 
-      {segments.length > 0 && (
+      {segments.length > 0 ? (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">
@@ -136,17 +162,33 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
             ))}
           </CardContent>
         </Card>
+      ) : (
+        <Card>
+          <CardContent className="flex min-h-28 flex-col justify-center gap-1">
+            <p className="text-sm font-medium">No source topics yet</p>
+            <p className="text-muted-foreground text-xs">
+              The Source Analyst will add grounded topic candidates after transcription. If the campaign failed here, retry from the failed node above.
+            </p>
+          </CardContent>
+        </Card>
       )}
 
-      {strategy && (
+      {strategy ? (
         <StrategyPanel
           campaignId={campaignId}
           strategy={strategy}
           awaitingApproval={campaign.status === 'awaiting_strategy_approval'}
         />
+      ) : (
+        <Card>
+          <CardContent className="flex min-h-28 flex-col justify-center gap-1">
+            <p className="text-sm font-medium">Strategy pending</p>
+            <p className="text-muted-foreground text-xs">The Strategist cannot plan production until source analysis has finished.</p>
+          </CardContent>
+        </Card>
       )}
 
-      {assets.length > 0 && (
+      {assets.length > 0 ? (
         <section className="flex flex-col gap-3" aria-labelledby="campaign-assets-heading">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h2 id="campaign-assets-heading" className="text-base font-semibold">
@@ -162,6 +204,13 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
             ))}
           </div>
         </section>
+      ) : (
+        <Card>
+          <CardContent className="flex min-h-28 flex-col justify-center gap-1">
+            <p className="text-sm font-medium">No generated assets yet</p>
+            <p className="text-muted-foreground text-xs">Approve the strategy to start production. Rejected and abandoned history appears here once it exists.</p>
+          </CardContent>
+        </Card>
       )}
 
       {campaignReview && <CampaignReviewCard review={campaignReview} />}

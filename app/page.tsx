@@ -8,7 +8,7 @@ export default function Home() {
       <header className="flex flex-col gap-3">
         <div className="flex items-center gap-3">
           <h1 className="text-3xl font-semibold tracking-tight">Chorus</h1>
-          <Badge variant="secondary">Phase 1</Badge>
+          <Badge variant="secondary">Phase 9</Badge>
         </div>
         <p className="text-muted-foreground text-balance">
           One long-form podcast plus a growth objective, turned into a multi-platform campaign by
@@ -26,7 +26,8 @@ export default function Home() {
       <p className="text-muted-foreground text-sm">
         The app and the worker are two processes. Run <code className="font-mono">npm run dev</code>{' '}
         and <code className="font-mono">npm run worker</code> side by side, or a campaign will sit
-        queued forever. Ingest and transcription run today; the agents arrive in Phase 2 onward.
+        queued forever. Final campaigns include only Critic-passed assets and can be downloaded from
+        the review page.
       </p>
     </main>
   );

@@ -2,7 +2,7 @@
 
 Companion to `PRD.md`. The PRD says *what* and *why*. This document says *what exactly gets built, with which tools, in which order*.
 
-**Status:** Phase 8 complete, Phase 9 next
+**Status:** Phase 9 complete
 **Last updated:** 2026-08-10
 
 ---
@@ -875,17 +875,19 @@ Cross-asset review, forced replan under diversity 60, replacement asset generati
 
 **Built.** `lib/agents/campaign-reviewer.ts` scores the passing portfolio together and names the overlapping assets plus unused replacement segments. TypeScript owns the route: any diversity score below 60 forces `REPLAN`, and the result is durable per strategy version so retries reuse the paid review. Replans create a new strategy version, preserve removed passing assets as `replaced`, retain unchanged plan keys, and give replacements deterministic unique suffixes such as `asset_3_v2`. The replan output is validated against the previous plan and the unused segment pool before production resumes.
 
-Campaign Reviewer rows and Critic revision rows have unique idempotency keys. The final approval route resumes at `finalize` after approval, which remains intentionally unbuilt until Phase 9; a final change request writes durable feedback before resuming at `replan`.
+Campaign Reviewer rows and Critic revision rows have unique idempotency keys. The final approval route resumes at the Phase 9 `finalize` node after approval; a final change request writes durable feedback before resuming at `replan`.
 
 ### Phase 8 - Live graph and timeline ✅
 `AgentGraph` with live node states and animated loop-back edges. Timeline filtering. Collapsible tool logs.
 **Done:** a full run is legible from the graph alone, with no console open.
 
-**Built.** `app/api/campaigns/[id]/events/route.ts` streams the monotonic `agent_events` cursor with a 750 ms server-side poll. `components/useEventStream.ts` backfills the snapshot, reconnects from the last event id, and refreshes durable campaign state after each event. `AgentGraph` renders the section 6 node set with fixed positions, state colors, an agent roster, and persistent animated loop-back edges when a decision event traverses one. `AgentTimeline` defaults to reverse chronology, supports chronological order and agent filtering, and keeps tool payloads collapsed. The existing `finalize` frontier is rendered as skipped when Phase 7 parks there; Phase 9 remains unimplemented.
+**Built.** `app/api/campaigns/[id]/events/route.ts` streams the monotonic `agent_events` cursor with a 750 ms server-side poll. `components/useEventStream.ts` backfills the snapshot, reconnects from the last event id, and refreshes durable campaign state after each event. `AgentGraph` renders the section 6 node set with fixed positions, state colors, an agent roster, and persistent animated loop-back edges when a decision event traverses one. `AgentTimeline` defaults to reverse chronology, supports chronological order and agent filtering, and keeps tool payloads collapsed. Phase 9 registers `finalize`, so the graph now ends at a real complete campaign rather than the parked frontier.
 
 ### Phase 9 - Export and polish
 Zip export with `campaign.md`. Empty, loading, and failure states. Failure recovery from any node. README with the architecture diagram. Record the demo.
 **Done:** section 1's definition of done passes on a clean clone.
+
+**Built.** The final review page and `GET /api/campaigns/[id]/export` stream a ZIP with `campaign.md`, written assets as Markdown, and only Critic-passed clips and posts. Paths are sanitized and validated beneath `STORAGE_DIR`; media is streamed by archiver rather than loaded into one large buffer. The `finalize` graph node validates the passed portfolio before marking the campaign complete. Dashboard and review routes include loading, empty, failure, failed-campaign, and retry guidance states. Failed campaigns retry from their durable `current_node`, and the worker claim RPC reclaims only active rows whose heartbeat is stale while preserving `FOR UPDATE SKIP LOCKED` concurrency safety and ownership fencing.
 
 Realistic effort: roughly 55 to 75 focused hours. Phase 5 and Phase 6 are the two that will overrun.
 
@@ -927,5 +929,6 @@ Decide these when you reach them; none block Phase 0.
 1. ~~**Idempotent replans.**~~ **Resolved in Phase 7.** Replans mark the old asset `replaced`, preserve its reviews, and use a deterministic unique suffix such as `asset_3_v2` for the new plan key. Campaign review and revision rows also have unique idempotency keys.
 2. ~~**Structured output API.**~~ **Resolved in Phase 0.** `Output.object`, read from `result.output`, wrapped in `lib/llm/structured.ts`. The spike also established that strict schema mode is *not* in effect through OpenRouter, so the repair pass is the primary path. See `docs/ARCHITECTURE.md`.
 3. ~~**Model selection.**~~ **Resolved in Phase 0.** All three IDs verified against the OpenRouter models API on 2026-08-09. Added `MODEL_OVERRIDE_ALL` for cheap development runs; it must be unset for demos.
-4. **Dependency drift.** The versions in section 2 were verified 2026-08-09. If you start well after that, re-run the check before scaffolding rather than after.
+4. ~~**Stale worker claims.**~~ **Resolved in Phase 9.** Active claims are reclaimed after a stale heartbeat through the transactional claim RPC. Explicit failed retries resume `current_node`; existing durable work is reused before a paid call is repeated.
+5. **Dependency drift.** The versions in section 2 were verified 2026-08-09. If you start well after that, re-run the check before scaffolding rather than after.
 ```

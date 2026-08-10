@@ -249,10 +249,7 @@ export function deriveGraphState(
     let state: GraphNodeState = visited.has(node.id) ? 'complete' : 'idle';
     if (node.id === 'start' && campaign?.status === 'queued' && !lastRuntimeNode) state = 'active';
     if (currentDisplayNode === node.id) {
-      state = campaign?.status === 'failed' ? 'failed' : 'active';
-    }
-    if (node.id === 'finalize' && currentDisplayNode === 'finalize' && campaign?.status === 'complete') {
-      state = 'skipped';
+      state = campaign?.status === 'failed' ? 'failed' : campaign?.status === 'complete' ? 'complete' : 'active';
     }
     if (node.id === 'done') state = 'idle';
     states[node.id] = state;

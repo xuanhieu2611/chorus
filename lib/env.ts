@@ -21,6 +21,12 @@ function num(name: string, fallback: number): number {
   return parsed;
 }
 
+function positiveNum(name: string, fallback: number): number {
+  const value = num(name, fallback);
+  if (value <= 0) throw new Error(`Env var ${name} must be greater than zero, got "${value}".`);
+  return value;
+}
+
 export const env = {
   get openrouterApiKey() {
     return required('OPENROUTER_API_KEY');
@@ -87,5 +93,8 @@ export const env = {
   },
   get campaignCostCeilingUsd() {
     return num('CAMPAIGN_COST_CEILING_USD', 3.0);
+  },
+  get staleClaimAfterSeconds() {
+    return Math.max(30, positiveNum('STALE_CLAIM_AFTER_SECONDS', 90));
   },
 };

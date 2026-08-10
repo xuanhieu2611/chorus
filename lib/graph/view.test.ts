@@ -50,9 +50,11 @@ test('records loop-back traversal and the display-only asset decision', () => {
   assert.equal(state.traversedEdges.has(graphEdgeId('more_assets', 'produce')), true);
 });
 
-test('marks an unbuilt finalize frontier as skipped and failed work as failed', () => {
-  const parked = deriveGraphState({ status: 'complete', current_node: 'finalize' }, []);
-  assert.equal(parked.states.finalize, 'skipped');
+test('marks finalized work complete in its terminal node and failed work as failed', () => {
+  const finalized = deriveGraphState({ status: 'complete', current_node: 'finalize' }, [
+    event(1, 'finalize', 'Entering finalize.'),
+  ]);
+  assert.equal(finalized.states.finalize, 'complete');
 
   const failed = deriveGraphState({ status: 'failed', current_node: 'produce' }, [
     event(1, 'produce', 'Entering produce.'),
