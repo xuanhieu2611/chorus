@@ -178,6 +178,12 @@ Required:
 - MP3
 - WAV
 
+Video is the primary assumption.
+
+Audio-only sources are accepted, but produce caption-card audiograms rather than talking-head clips, and skip visual inspection entirely.
+
+Detection is by probing for a video stream, not by file extension.
+
 ### Campaign goal
 
 Free-text input.
@@ -444,6 +450,10 @@ Responsibilities:
 - create subtitles
 - optionally crop 16:9 → 9:16
 - generate title / hook text
+
+For audio-only sources, the crop and visual inspection steps are skipped.
+
+Boundary selection, pacing evaluation, and subtitle generation are unchanged, since they derive from silence detection and word timings rather than from frames.
 
 Important:
 

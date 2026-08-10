@@ -20,6 +20,7 @@ These were decided up front. Do not relitigate them mid-build.
 | Transcription | Groq `whisper-large-v3-turbo` | Word-level timestamps, ~$0.04/hr, ~60s for a 90 minute file. |
 | Database | Supabase Postgres (cloud free tier) | Managed Postgres, no Docker, trivial to deploy later. |
 | Video | Full render: cut + 9:16 crop + burned word-level captions | The strongest single demo moment. |
+| Source media | **Video-primary.** MP3/WAV accepted but take a degraded path | Short-form platforms need a video file either way, so audio must still render one. See section 9.1. |
 | Long jobs | Standalone Node worker process, polls a claim queue | No serverless timeout ceiling. Survives a 20 minute campaign run. |
 | Live updates | Server-Sent Events from a Next.js route handler | Keeps all DB credentials server-side. No RLS gymnastics. |
 | Deploy | Local only for v1 | Ship the agent system first. |
@@ -101,7 +102,7 @@ OPENROUTER_API_KEY=
 # Verify current IDs at https://openrouter.ai/models before first run.
 MODEL_REASONING=anthropic/claude-sonnet-4.5   # Director, Strategist, Critic, Campaign Reviewer
 MODEL_FAST=google/gemini-2.5-flash            # Source Analyst map pass, cheap bulk work
-MODEL_VISION=anthropic/claude-sonnet-4.5      # Rendered-clip frame inspection
+MODEL_VISION=anthropic/claude-sonnet-4.5      # Clip frame inspection; video sources only
 
 # --- Transcription ---
 GROQ_API_KEY=
@@ -580,16 +581,22 @@ const DirectorSchema = z.object({
 
 The only agent with a genuine perceive-act-perceive loop. This is the technically interesting one, so build it properly.
 
+**The loop branches on `campaigns.has_video_stream`, set by `ffprobe` during ingest.** Do not send frames from an audio-only source to a vision model; they are six identical rectangles and you would be paying tokens to learn nothing.
+
 ```
 choose boundaries from segment + word timestamps
   -> ffmpeg cut (fast, no crop, no captions: the draft)
-  -> inspect: silencedetect + 6 sampled frames + first 10s of words
+  -> inspect:
+       video : silencedetect + 6 sampled frames + first 10s of words
+       audio : silencedetect + first 10s of words          (no vision call)
   -> LLM judges: hook latency, dead air, abrupt ending
   -> adjust start/end at most twice
-  -> final render: crop 9:16 + burn captions + hook overlay
+  -> final render:
+       video : crop 9:16 + burn captions + hook overlay
+       audio : caption card 1080x1920 + burn captions + hook overlay
 ```
 
-Snap boundaries to word timestamps so clips never cut mid-word. Start on a word boundary, end at the last word plus 300 ms of tail.
+Snap boundaries to word timestamps so clips never cut mid-word. Start on a word boundary, end at the last word plus 300 ms of tail. This applies identically on both paths.
 
 ```ts
 const ClipPlanSchema = z.object({
@@ -608,6 +615,8 @@ const InspectSchema = z.object({
   suggested_end: z.number().nullable(),
 });
 ```
+
+On the audio path, populate `InspectSchema` from `silencedetect` and word timings alone and skip the model call entirely. Hook latency and dead air are both derivable from timestamps without any model, so the audio path is not just cheaper, it is more reliable.
 
 Be honest in the README about what "inspection" is: silence detection plus sampled frames plus transcript timing. It is not true video understanding. The silence detection is doing most of the real work and that is fine, but do not overclaim it.
 
@@ -726,12 +735,27 @@ ffmpeg -y -ss {start} -i source.mp4 -t {dur} \
 
 `trunc(.../2)*2` forces even dimensions; libx264 rejects odd ones. `-movflags +faststart` matters for browser playback.
 
-**Audio-only sources.** MP3 and WAV are accepted inputs, so there is no video to crop. Render captions over a generated background:
+### 9.1 Audio-only sources
+
+MP3 and WAV are accepted (PRD section 6 promises them), but there is no video stream to crop and no frames worth looking at. `ffprobe` decides this once at ingest and writes `campaigns.has_video_stream`; every downstream branch reads that column rather than sniffing the file extension, because an MP4 can legally contain no video track.
+
+What changes on the audio path:
+
+| Step | Video source | Audio source |
+|---|---|---|
+| Crop to 9:16 | center crop from 16:9 | nothing to crop, render at 1080x1920 |
+| Frame sampling | 6 frames to `MODEL_VISION` | skipped |
+| Inspection | silence + frames + word timings | silence + word timings, no model call |
+| Output | talking-head clip | caption card, an audiogram |
+
+Render captions over a generated background:
 
 ```bash
 ffmpeg -y -f lavfi -i color=c=0x0B0B0F:s=1080x1920:d={dur} -ss {start} -t {dur} -i source.mp3 \
   -vf "ass={caps.ass}" -shortest -c:v libx264 -pix_fmt yuv420p -c:a aac out.mp4
 ```
+
+The output is a real, postable MP4, which is what TikTok and Reels require. It is also plainly weaker than a talking-head clip, so record your demo with a video podcast and say so in the README.
 
 **Subtitles.** `lib/media/subtitles.ts` converts word timestamps to ASS with a karaoke-style highlight: 2 to 4 words on screen at a time, current word tinted. ASS rather than SRT because it gives positioning and per-word styling control.
 
@@ -804,8 +828,8 @@ Text assets end to end, with grounding verification. Asset cards.
 **Done:** a real X thread and LinkedIn post, every claim traceable to a transcript quote.
 
 ### Phase 5 - Clip Producer
-The full media pipeline. Draft cut, inspection, boundary adjustment, final 9:16 render with burned captions, upload to Supabase Storage.
-**Done:** a vertical MP4 with captions plays in the browser. Automated test asserts rendered duration matches the requested boundaries within 100 ms.
+The full media pipeline. Draft cut, inspection, boundary adjustment, final 9:16 render with burned captions, upload to Supabase Storage. Build the video path first, then add the `has_video_stream` branch from section 9.1.
+**Done:** a vertical MP4 with captions plays in the browser. Automated test asserts rendered duration matches the requested boundaries within 100 ms. **Run the same test with an MP3 source** and confirm it renders a caption card without making a single vision call.
 
 ### Phase 6 - Critic and the revision loop
 Critic across both asset types. Threshold routing. Revision loop with a hard limit. `select_alternative` on `REJECT`. Asset abandonment.
@@ -847,6 +871,7 @@ State these in the README. Naming your own limits reads as engineering maturity;
 
 - Center crop, not face tracking. A speaker sitting off-center gets a bad frame.
 - Clip inspection is silence detection plus sampled frames, not video understanding.
+- Audio-only sources produce caption-card audiograms, not talking-head clips. Supported and postable, but visibly weaker output.
 - Single speaker assumed. No diarization, so multi-guest podcasts get mis-attributed quotes.
 - No B-roll, transitions, or music.
 - Single user, no auth. RLS is enabled and denies everything; access goes through the server.
