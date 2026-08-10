@@ -33,7 +33,7 @@ Everything in PRD section 22, plus: multi-user auth, cloud deploy, Supabase Real
 
 ## 1. Definition of done
 
-The MVP is complete when, on a clean machine with `pnpm install` and four env vars, a user can:
+The MVP is complete when, on a clean machine with `npm install` and four env vars, a user can:
 
 1. Upload a 30 to 120 minute MP4/MOV/MP3/WAV file and type a growth objective.
 2. Watch a live agent graph light up node by node as work progresses.
@@ -54,7 +54,7 @@ Plus the two non-negotiable correctness properties from PRD section 27:
 ```bash
 ffmpeg -version    # 8.1.2   installed 2026-08-09 via Homebrew
 node -v            # v24.14.0  (Next.js 16 requires >= 20.9.0)
-pnpm -v            # 10.32.0
+npm -v             # 11.9.0
 ```
 
 Accounts needed: **OpenRouter** (key provided later), **Groq** (free tier), **Supabase** (free tier).
@@ -195,7 +195,7 @@ chorus/
 └── storage/                              # gitignored
 ```
 
-Run with two processes: `pnpm dev` (Next.js) and `pnpm worker` (`tsx watch worker/index.ts`).
+Run with two processes: `npm run dev` (Next.js) and `npm run worker` (`tsx watch worker/index.ts`).
 
 ---
 
@@ -809,7 +809,7 @@ Each phase ends in something you can run and look at. Do not start a phase befor
 
 **Do the structured-output spike first** (section 7.0): one throwaway file that calls your chosen model through OpenRouter with a small Zod schema, via both `Output.object` and `generateObject`. Confirm which returns clean typed data, whether strict schema mode is actually in effect, and what happens when the model returns malformed JSON. Then write `lib/llm/structured.ts` around the winner. Every later phase depends on this working.
 
-**Done:** `pnpm build` type-checks under TS 7, and the worker claims a manually inserted campaign row, logs an event, exits cleanly.
+**Done:** `npm run build` type-checks under TS 7, and the worker claims a manually inserted campaign row, logs an event, exits cleanly.
 
 ### Phase 1 - Ingest and transcribe
 Upload route streaming to disk. `ingest` node (ffprobe, audio extraction). `transcribe` node with Groq, chunking, and offset merging. Cost accounting and the ceiling check.

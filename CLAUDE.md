@@ -19,8 +19,8 @@ The product thesis is that the system exercises judgment rather than running a p
 None exist yet. Once Phase 0 scaffolds the project, the intended model is two processes running side by side:
 
 ```bash
-pnpm dev       # Next.js app
-pnpm worker    # tsx watch worker/index.ts, runs the agent graph
+npm run dev       # Next.js app
+npm run worker    # tsx watch worker/index.ts, runs the agent graph
 ```
 
 Update this section with the real commands, including how to run a single test, as soon as they exist.
