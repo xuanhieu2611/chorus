@@ -4,7 +4,13 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 
-export function ApprovalGate({ campaignId }: { campaignId: string }) {
+export function ApprovalGate({
+  campaignId,
+  gate = 'strategy',
+}: {
+  campaignId: string;
+  gate?: 'strategy' | 'final';
+}) {
   const [showChanges, setShowChanges] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [busy, setBusy] = useState<'approve' | 'request_changes' | null>(null);
@@ -26,8 +32,12 @@ export function ApprovalGate({ campaignId }: { campaignId: string }) {
       if (!response.ok) throw new Error(payload.error ?? 'Could not resolve the approval gate.');
       setResolved(
         action === 'approve'
-          ? 'Approved. Production is queued.'
-          : 'Changes saved. The Strategist is queued for another pass.',
+          ? gate === 'final'
+            ? 'Approved. Packaging is queued.'
+            : 'Approved. Production is queued.'
+          : gate === 'final'
+            ? 'Changes saved. The Strategist is queued for another portfolio pass.'
+            : 'Changes saved. The Strategist is queued for another pass.',
       );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -43,10 +53,13 @@ export function ApprovalGate({ campaignId }: { campaignId: string }) {
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
       <div>
-        <p className="text-sm font-medium">Your approval is required</p>
+        <p className="text-sm font-medium">
+          {gate === 'final' ? 'Final approval is required' : 'Your approval is required'}
+        </p>
         <p className="text-muted-foreground mt-1 text-xs">
-          The Director approved this plan. Nothing will be produced until you approve it or request
-          a specific change.
+          {gate === 'final'
+            ? 'The Campaign Reviewer has scored the portfolio. Approve it to queue packaging or request a specific replacement.'
+            : 'The Director approved this plan. Nothing will be produced until you approve it or request a specific change.'}
         </p>
       </div>
 
@@ -56,7 +69,11 @@ export function ApprovalGate({ campaignId }: { campaignId: string }) {
           onChange={(event) => setFeedback(event.target.value)}
           rows={3}
           disabled={busy !== null}
-          placeholder="What should the next strategy do differently?"
+          placeholder={
+            gate === 'final'
+              ? 'What should the revised portfolio change?'
+              : 'What should the next strategy do differently?'
+          }
           aria-label="Requested strategy changes"
         />
       )}
@@ -65,7 +82,11 @@ export function ApprovalGate({ campaignId }: { campaignId: string }) {
 
       <div className="flex flex-wrap gap-2">
         <Button onClick={() => void submit('approve')} disabled={busy !== null}>
-          {busy === 'approve' ? 'Approving…' : 'Approve strategy'}
+          {busy === 'approve'
+            ? 'Approving...'
+            : gate === 'final'
+              ? 'Approve campaign'
+              : 'Approve strategy'}
         </Button>
         {showChanges ? (
           <Button

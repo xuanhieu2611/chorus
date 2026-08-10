@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { validateStrategy, type StrategyPlan } from './strategist';
+import {
+  replacementPlanKey,
+  validateReplan,
+  validateStrategy,
+  type StrategyPlan,
+} from './strategist';
+import type { CampaignReview } from './campaign-reviewer';
 import type { SegmentRow } from '../db/client';
 
 function segment(id: string, start: number, end: number): SegmentRow {
@@ -117,4 +123,60 @@ test('validateStrategy rejects duplicate stable plan keys and campaign-disabled 
   const errors = validateStrategy(invalid, segments, { ...constraints, platforms: ['tiktok'] });
   assert.ok(errors.some((error) => error.includes('duplicated')));
   assert.ok(errors.some((error) => error.includes('not enabled')));
+});
+
+test('validateReplan preserves kept assets and requires a suffixed replacement key', () => {
+  const replanReview: CampaignReview = {
+    scores: {
+      asset_quality: 80,
+      diversity: 40,
+      audience_fit: 80,
+      brand_consistency: 80,
+      overall: 70,
+    },
+    problems: [{ issue: 'The two assets make the same argument.', asset_plan_keys: ['asset_2'] }],
+    recommendations: [{
+      action: 'replace',
+      plan_key: 'asset_2',
+      replacement_topic: 'A distinct topic',
+      replacement_segment_ids: ['s3'],
+    }],
+    decision: 'REPLAN',
+  };
+  const input = {
+    campaignId: 'campaign',
+    previous: plan(),
+    review: replanReview,
+    segments,
+    targetVersion: 2,
+    occupiedPlanKeys: ['asset_1', 'asset_2'],
+    goal: 'Grow the show',
+    audience: 'Builders',
+    brandVoice: 'Direct',
+    creditBudget: 12,
+    maxAssets: 6,
+    maxVideoSeconds: 120,
+    platforms: ['tiktok', 'x', 'linkedin'],
+  };
+  const valid = {
+    ...plan(),
+    planned_assets: [
+      plan().planned_assets[0],
+      {
+        ...plan().planned_assets[1],
+        plan_key: 'asset_2_v2',
+        topic: 'A distinct topic',
+        segment_ids: ['s3'],
+      },
+    ],
+  };
+
+  assert.deepEqual(validateReplan(valid, input), []);
+  assert.equal(replacementPlanKey('asset_2', 2, ['asset_2', 'asset_2_v2']), 'asset_2_v2_2');
+  assert.ok(
+    validateReplan(
+      { ...valid, planned_assets: [plan().planned_assets[0], plan().planned_assets[1]] },
+      input,
+    ).some((error) => error.includes('must be removed')),
+  );
 });

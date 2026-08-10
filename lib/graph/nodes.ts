@@ -1,13 +1,24 @@
 import { mkdir, stat } from 'node:fs/promises';
 import type { AssetRow, SegmentRow } from '@/lib/db/client';
 import type { Json } from '@/lib/db/database.types';
+import {
+  CampaignReviewSchema,
+  decideCampaignReview,
+  ensureReplanRecommendation,
+  reviewCampaign,
+  type CampaignReview,
+  type CampaignReviewAsset,
+  type CampaignReviewSegment,
+} from '@/lib/agents/campaign-reviewer';
 import { CriticSchema, critiqueAsset, decideCritic, type CriticReview } from '@/lib/agents/critic';
 import { reviewStrategy } from '@/lib/agents/director';
 import { analyzeSource } from '@/lib/agents/source-analyst';
 import {
   CREDIT_COST,
   createStrategy,
+  replanStrategy,
   selectAlternative,
+  validateReplan,
   type PlannedAsset,
 } from '@/lib/agents/strategist';
 import { produceClip } from '@/lib/agents/clip-producer';
@@ -29,10 +40,14 @@ import {
   countSegments,
   ensurePlannedAssets,
   getAlternativeRun,
+  getCampaignReview,
+  getCampaignReviewRun,
   getCampaignAssets,
   getCriticRun,
   getDirectorReview,
   getLatestReview,
+  getFinalApprovalFeedback,
+  getReplanRun,
   getLatestStrategy,
   getRevisionRequest,
   getSegments,
@@ -41,10 +56,12 @@ import {
   hasTranscript,
   markAssetPassed,
   markAssetRejected,
+  markAssetReplaced,
   markStrategyApproved,
   planFromStrategy,
   prepareAssetRevision,
   recordReview,
+  recordCampaignReview,
   replacePlannedAsset,
   saveSegments,
   saveStrategy,
@@ -61,9 +78,9 @@ import type { NodeFn, NodeId, NodeResult } from '@/lib/graph/types';
  * Built so far: `ingest` and `transcribe` (Phase 1), `analyze` (Phase 2),
  * `strategize`, `director_review_plan`, and the first gate (Phase 3), grounded
  * writing (Phase 4), the Clip Producer (Phase 5), and the Critic loop (Phase 6).
- * The Campaign Reviewer frontier remains absent from the registry rather than
- * stubbed, so `run.ts` stops cleanly when it reaches it. A plausible empty stub
- * is worse than a missing entry because it makes an unbuilt phase look complete.
+ * Phase 7 adds the Campaign Reviewer, the replan loop, and the final approval
+ * gate. `finalize` stays absent from the registry until Phase 9 so a campaign
+ * cannot claim that packaging exists before that phase is built.
  */
 
 /**
@@ -823,8 +840,225 @@ const abandonAssetNode: NodeFn = async (ctx): Promise<NodeResult> => {
   };
 };
 
-/** The registry the executor walks. The Campaign Reviewer frontier remains
- * intentionally absent until Phase 7; reaching it parks a truthful campaign. */
+/**
+ * Judge all currently planned passing assets together. The Campaign Reviewer
+ * sees the unused source pool so a REPLAN names an executable replacement, not
+ * just a complaint about repetition.
+ */
+const campaignReview: NodeFn = async (ctx): Promise<NodeResult> => {
+  const { campaign, campaignId } = ctx;
+  const strategy = await getLatestStrategy(campaignId);
+  if (!strategy) throw new Error('Campaign review reached without a saved strategy.');
+  const plan = planFromStrategy(strategy);
+  const assets = await getCampaignAssets(campaignId);
+  const assetByKey = new Map(assets.map((asset) => [asset.plan_key, asset]));
+  const passingPlans = plan.planned_assets.filter(
+    (planned) => assetByKey.get(planned.plan_key)?.status === 'passed',
+  );
+  const activeMissing = plan.planned_assets.filter((planned) => {
+    const status = assetByKey.get(planned.plan_key)?.status;
+    return status !== 'passed' && status !== undefined && ACTIVE_ASSET_STATUSES.has(status);
+  });
+  if (activeMissing.length > 0) {
+    return {
+      next: 'produce',
+      reason: `Campaign review is waiting for ${activeMissing.map((asset) => asset.plan_key).join(', ')} to pass the Critic.`,
+    };
+  }
+  if (passingPlans.length === 0) {
+    throw new Error('Campaign review cannot continue because every planned asset was abandoned or rejected.');
+  }
+
+  const reviewAssets = await buildCampaignReviewAssets(passingPlans, assetByKey);
+  const unusedSegments = await getUnusedSegments(campaignId);
+  const reviewSegments = unusedSegments.map(toCampaignReviewSegment);
+
+  const stored = await getCampaignReview(campaignId, strategy.version);
+  let review = stored
+    ? parseCampaignReview(stored)
+    : (await getCampaignReviewRun(campaignId, strategy.version))?.review ??
+      (await reviewCampaign({
+        campaignId,
+        strategyVersion: strategy.version,
+        assets: reviewAssets,
+        unusedSegments: reviewSegments,
+        goal: campaign.goal,
+        audience: campaign.audience,
+        brandVoice: campaign.brand_voice,
+      }));
+
+  const modelDecision = review.decision;
+  const routing = decideCampaignReview(review);
+  if (routing.decision === 'REPLAN') {
+    review = ensureReplanRecommendation(review, reviewAssets, reviewSegments);
+  }
+  const persisted = await recordCampaignReview(campaignId, strategy.version, review);
+
+  await emit({
+    campaignId,
+    agent: 'campaign_reviewer',
+    node: 'campaign_review',
+    level: routing.decision === 'REPLAN' ? 'warn' : 'info',
+    message: `Campaign Reviewer ${routing.decision} for strategy v${strategy.version}: diversity ${review.scores.diversity.toFixed(1)}/100${routing.forcedReplan ? ' (forced by the diversity floor)' : ''}.`,
+    data: {
+      campaign_review_id: persisted.id,
+      strategy_version: strategy.version,
+      decision: routing.decision,
+      model_decision: modelDecision,
+      forced_replan: routing.forcedReplan,
+      scores: review.scores,
+      problems: review.problems,
+      recommendations: review.recommendations,
+    } as Json,
+  });
+
+  if (routing.decision === 'REPLAN' && campaign.replan_count < env.maxCampaignReplans) {
+    const counted = campaign.replan_count >= strategy.version;
+    return {
+      next: 'replan',
+      patch: counted ? undefined : { replan_count: campaign.replan_count + 1 },
+      reason: counted
+        ? `Resuming the Campaign Reviewer's REPLAN for strategy v${strategy.version}; the replan budget was already reserved before a worker retry.`
+        : `Campaign Reviewer found a repetitive portfolio and queued replan ${campaign.replan_count + 1} of ${env.maxCampaignReplans}.`,
+    };
+  }
+
+  if (routing.decision === 'REPLAN') {
+    await emit({
+      campaignId,
+      agent: 'campaign_reviewer',
+      node: 'campaign_review',
+      level: 'warn',
+      message: `Campaign Reviewer requested a replan, but all ${env.maxCampaignReplans} campaign replans are spent. The final gate will decide whether to ship this portfolio.`,
+      data: { strategy_version: strategy.version, replan_count: campaign.replan_count },
+    });
+  }
+
+  return {
+    next: 'await_final_approval',
+    reason:
+      routing.decision === 'REPLAN'
+        ? 'The portfolio still needs a replan, but the campaign replan limit is exhausted; pausing at the final approval gate.'
+        : `Campaign Reviewer approved the portfolio at ${review.scores.overall.toFixed(1)}/100 overall; pausing for final human approval.`,
+  };
+};
+
+/**
+ * Apply a Campaign Reviewer replacement. A successful replan is a new strategy
+ * version, while unchanged passing assets keep their original plan keys and
+ * rows. Removed passing rows are marked `replaced` before the new strategy is
+ * saved, so a crash cannot make both the old and new versions shippable.
+ */
+const replan: NodeFn = async (ctx): Promise<NodeResult> => {
+  const { campaign, campaignId } = ctx;
+  const latest = await getLatestStrategy(campaignId);
+  if (!latest) throw new Error('Replan reached without a saved strategy.');
+
+  // If the worker died after saving the new strategy, its durable replan run
+  // identifies that version and lets this node finish the bookkeeping without a
+  // second model call.
+  const reviewForLatestStrategy = await getCampaignReview(campaignId, latest.version);
+  const alreadySaved =
+    latest.version > 1 && !reviewForLatestStrategy
+      ? await getReplanRun(campaignId, latest.version - 1, latest.version)
+      : null;
+  if (alreadySaved) {
+    const currentAssets = await getCampaignAssets(campaignId);
+    await preserveRemovedPassingAssets(currentAssets, latest);
+    await markStrategyApproved(latest.id, 'human');
+    return {
+      next: 'produce',
+      reason: `Resuming strategy v${latest.version} saved by an earlier replan; unchanged assets stay reusable and replacement history remains preserved.`,
+    };
+  }
+
+  const sourceStrategy = latest;
+  const sourcePlan = planFromStrategy(sourceStrategy);
+  const currentAssets = await getCampaignAssets(campaignId);
+  const assetByKey = new Map(currentAssets.map((asset) => [asset.plan_key, asset]));
+  const passingPlans = sourcePlan.planned_assets.filter(
+    (planned) => assetByKey.get(planned.plan_key)?.status === 'passed',
+  );
+  const reviewAssets = await buildCampaignReviewAssets(
+    passingPlans,
+    assetByKey,
+    currentAssets.filter((asset) => asset.status === 'passed'),
+  );
+  const unusedSegments = await getUnusedSegments(campaignId);
+  const reviewRow = await getCampaignReview(campaignId, sourceStrategy.version);
+  if (!reviewRow) {
+    throw new Error(`No Campaign Reviewer result exists for strategy v${sourceStrategy.version}.`);
+  }
+  let review = parseCampaignReview(reviewRow);
+  const humanFeedback = await getFinalApprovalFeedback(campaignId, sourceStrategy.version);
+  if (humanFeedback) review = { ...review, decision: 'REPLAN' };
+  review = ensureReplanRecommendation(
+    review,
+    reviewAssets,
+    unusedSegments.map(toCampaignReviewSegment),
+  );
+
+  const targetVersion = sourceStrategy.version + 1;
+  const replanInput = {
+    campaignId,
+    previous: sourcePlan,
+    review,
+    segments: await getSegments(campaignId),
+    targetVersion,
+    occupiedPlanKeys: currentAssets.map((asset) => asset.plan_key),
+    humanFeedback: humanFeedback ?? undefined,
+    goal: campaign.goal,
+    audience: campaign.audience,
+    brandVoice: campaign.brand_voice,
+    creditBudget: campaign.credit_budget,
+    maxAssets: Math.min(campaign.max_assets, env.maxAssets),
+    maxVideoSeconds: campaign.max_video_seconds,
+    platforms: campaign.platforms,
+  };
+  const durableRun = await getReplanRun(campaignId, sourceStrategy.version, targetVersion);
+  const proposed = durableRun?.plan ?? (await replanStrategy(replanInput));
+  const violations = validateReplan(proposed, replanInput);
+  if (violations.length > 0) {
+    throw new Error(`Durable replan output is no longer valid: ${violations.join('; ')}`);
+  }
+
+  const newPlanKeys = new Set(proposed.planned_assets.map((asset) => asset.plan_key));
+  await preserveRemovedPassingAssets(currentAssets, sourceStrategy, newPlanKeys);
+  const saved = await saveStrategy(campaignId, targetVersion, proposed);
+  await markStrategyApproved(saved.id, 'human');
+
+  await emit({
+    campaignId,
+    agent: 'content_strategist',
+    node: 'replan',
+    level: 'info',
+    message: `Saved strategy v${saved.version}; kept passing assets retain their keys and replacement assets use suffixed keys.`,
+    data: {
+      strategy_id: saved.id,
+      version: saved.version,
+      replaced_plan_keys: review.recommendations
+        .filter((recommendation) => recommendation.action === 'replace')
+        .map((recommendation) => recommendation.plan_key),
+      planned_assets: proposed.planned_assets.map((asset) => asset.plan_key),
+      human_feedback: humanFeedback,
+    },
+  });
+
+  return {
+    next: 'produce',
+    reason: `Replanned the campaign as strategy v${saved.version}; production will generate only the new replacement assets.`,
+  };
+};
+
+/** Final human gate. Phase 9 owns the package that follows approval. */
+const awaitFinalApproval: NodeFn = async (): Promise<NodeResult> => ({
+  next: null,
+  patch: { status: 'awaiting_final_approval' },
+  reason: 'The Campaign Reviewer has finished the portfolio scorecard and is waiting for final human approval.',
+});
+
+/** The registry the executor walks. `finalize` remains absent until Phase 9;
+ * reaching it parks a truthful post-approval campaign. */
 export const NODES: Partial<Record<NodeId, NodeFn>> = {
   ingest,
   transcribe,
@@ -836,6 +1070,9 @@ export const NODES: Partial<Record<NodeId, NodeFn>> = {
   critique,
   select_alternative: selectAlternativeNode,
   abandon_asset: abandonAssetNode,
+  campaign_review: campaignReview,
+  replan,
+  await_final_approval: awaitFinalApproval,
 };
 
 const ACTIVE_ASSET_STATUSES = new Set(['planned', 'generating', 'revising', 'needs_review']);
@@ -914,6 +1151,88 @@ function nextAlternativePlanKey(planKey: string, assets: AssetRow[]): string {
   let index = 1;
   while (assets.some((asset) => asset.plan_key === `${root}_alt_${index}`)) index++;
   return `${root}_alt_${index}`;
+}
+
+async function buildCampaignReviewAssets(
+  plannedAssets: PlannedAsset[],
+  assetByKey: Map<string, AssetRow>,
+  preferredAssets?: AssetRow[],
+): Promise<CampaignReviewAsset[]> {
+  const preferredByKey = new Map((preferredAssets ?? []).map((asset) => [asset.plan_key, asset]));
+  return Promise.all(
+    plannedAssets.map(async (planned) => {
+      const asset = preferredByKey.get(planned.plan_key) ?? assetByKey.get(planned.plan_key);
+      if (!asset || asset.status !== 'passed') {
+        throw new Error(`Campaign Reviewer expected passing asset ${planned.plan_key}.`);
+      }
+      if (asset.content === null) throw new Error(`Passing asset ${planned.plan_key} has no content.`);
+      const review = await getLatestReview(asset.id);
+      if (!review || review.decision !== 'PASS') {
+        throw new Error(`Passing asset ${planned.plan_key} has no durable PASS review.`);
+      }
+      return {
+        planKey: planned.plan_key,
+        type: asset.type,
+        platform: asset.platform,
+        hook: asset.hook,
+        content: asset.content,
+        sourceSegmentIds: asset.source_segment_ids,
+        criticScores: review.scores,
+        criticFeedback: review.feedback,
+      };
+    }),
+  );
+}
+
+function toCampaignReviewSegment(segment: SegmentRow): CampaignReviewSegment {
+  return {
+    id: segment.id,
+    topic: segment.topic,
+    summary: segment.summary,
+    contentType: segment.content_type,
+    startTime: Number(segment.start_time),
+    endTime: Number(segment.end_time),
+    noveltyScore: segment.novelty_score === null ? null : Number(segment.novelty_score),
+  };
+}
+
+function parseCampaignReview(row: {
+  scores: Json;
+  problems: Json;
+  recommendations: Json;
+  decision: string;
+}): CampaignReview {
+  const parsed = CampaignReviewSchema.safeParse({
+    scores: row.scores,
+    problems: row.problems,
+    recommendations: row.recommendations,
+    decision: row.decision,
+  });
+  if (!parsed.success) throw new Error(`Campaign Reviewer result in the database is invalid: ${parsed.error.message}`);
+  return parsed.data;
+}
+
+async function preserveRemovedPassingAssets(
+  assets: AssetRow[],
+  strategy: Parameters<typeof planFromStrategy>[0],
+  desiredPlanKeys?: Set<string>,
+): Promise<void> {
+  const keep = desiredPlanKeys ?? new Set(planFromStrategy(strategy).planned_assets.map((asset) => asset.plan_key));
+  await Promise.all(
+    assets
+      .filter((asset) => asset.status === 'passed' && !keep.has(asset.plan_key))
+      .map(async (asset) => {
+        await markAssetReplaced(asset.id);
+        await emit({
+          campaignId: asset.campaign_id,
+          agent: 'content_strategist',
+          node: 'replan',
+          level: 'warn',
+          message: `Preserved ${asset.plan_key} as replaced history before the new plan took effect.`,
+          data: { asset_id: asset.id, plan_key: asset.plan_key, status: 'replaced' },
+        });
+      }),
+  );
 }
 
 function isWrittenType(type: string): type is WrittenAssetType {

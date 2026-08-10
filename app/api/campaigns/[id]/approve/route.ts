@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { db } from '@/lib/db/client';
 import { emit } from '@/lib/events';
 import { env } from '@/lib/env';
+import { getLatestCampaignReview } from '@/lib/tools/reviews';
 import { getLatestStrategy, markStrategyApproved } from '@/lib/tools/strategies';
 
 export const runtime = 'nodejs';
@@ -51,14 +52,20 @@ export async function POST(
 
   if (error) return Response.json({ error: error.message }, { status: 500 });
   if (!campaign) return Response.json({ error: 'Campaign not found.' }, { status: 404 });
-  if (
-    campaign.status !== 'awaiting_strategy_approval' ||
-    campaign.current_node !== 'await_strategy_approval'
-  ) {
+  const isStrategyGate =
+    campaign.status === 'awaiting_strategy_approval' &&
+    campaign.current_node === 'await_strategy_approval';
+  const isFinalGate =
+    campaign.status === 'awaiting_final_approval' && campaign.current_node === 'await_final_approval';
+  if (!isStrategyGate && !isFinalGate) {
     return Response.json(
-      { error: 'This campaign is not waiting for strategy approval.' },
+      { error: 'This campaign is not waiting at an approval gate.' },
       { status: 409 },
     );
+  }
+
+  if (isFinalGate) {
+    return resolveFinalApproval(id, campaign.replan_count, parsed.data);
   }
 
   const strategy = await getLatestStrategy(id);
@@ -79,6 +86,7 @@ export async function POST(
       })
       .eq('id', id)
       .eq('status', 'awaiting_strategy_approval')
+      .eq('current_node', 'await_strategy_approval')
       .select('id')
       .maybeSingle();
 
@@ -138,6 +146,7 @@ export async function POST(
     })
     .eq('id', id)
     .eq('status', 'awaiting_strategy_approval')
+    .eq('current_node', 'await_strategy_approval')
     .select('id')
     .maybeSingle();
 
@@ -145,4 +154,88 @@ export async function POST(
   if (!resumed) return Response.json({ error: 'The gate was already resolved.' }, { status: 409 });
 
   return Response.json({ status: 'queued', resume_node: 'strategize' });
+}
+
+async function resolveFinalApproval(
+  campaignId: string,
+  replanCount: number,
+  action: z.infer<typeof ApprovalAction>,
+): Promise<Response> {
+  const review = await getLatestCampaignReview(campaignId);
+  if (!review) return Response.json({ error: 'No campaign review exists to approve.' }, { status: 409 });
+
+  if (action.action === 'approve') {
+    const { data: resumed, error } = await db()
+      .from('campaigns')
+      .update({
+        status: 'queued',
+        current_node: 'finalize',
+        error: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', campaignId)
+      .eq('status', 'awaiting_final_approval')
+      .eq('current_node', 'await_final_approval')
+      .select('id')
+      .maybeSingle();
+
+    if (error) return Response.json({ error: error.message }, { status: 500 });
+    if (!resumed) return Response.json({ error: 'The final gate was already resolved.' }, { status: 409 });
+
+    await emit({
+      campaignId,
+      agent: 'human',
+      node: 'await_final_approval',
+      level: 'decision',
+      message: 'Final campaign approved. Packaging queued.',
+      data: { review_id: review.id, review_version: review.version, resume_node: 'finalize' },
+    });
+    return Response.json({ status: 'queued', resume_node: 'finalize' });
+  }
+
+  if (replanCount >= env.maxCampaignReplans) {
+    return Response.json(
+      { error: `This campaign has used all ${env.maxCampaignReplans} campaign replans.` },
+      { status: 409 },
+    );
+  }
+
+  const feedbackEvent = await emit({
+    campaignId,
+    agent: 'human',
+    node: 'await_final_approval',
+    level: 'decision',
+    message: 'Final campaign changes requested.',
+    data: {
+      review_id: review.id,
+      review_version: review.version,
+      feedback: action.feedback,
+      resume_node: 'replan',
+    },
+  });
+  if (!feedbackEvent) {
+    return Response.json(
+      { error: 'Could not save the requested changes. The campaign was not requeued.' },
+      { status: 500 },
+    );
+  }
+
+  const { data: resumed, error } = await db()
+    .from('campaigns')
+    .update({
+      status: 'queued',
+      current_node: 'replan',
+      replan_count: replanCount + 1,
+      error: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', campaignId)
+    .eq('status', 'awaiting_final_approval')
+    .eq('current_node', 'await_final_approval')
+    .select('id')
+    .maybeSingle();
+
+  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (!resumed) return Response.json({ error: 'The final gate was already resolved.' }, { status: 409 });
+  return Response.json({ status: 'queued', resume_node: 'replan' });
 }

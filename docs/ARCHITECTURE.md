@@ -2,7 +2,7 @@
 
 Mirrors `MVP.md` section 6. **Changing `lib/graph/nodes.ts` means updating this diagram in the same commit**, and `components/AgentGraph.tsx` renders the same node set live.
 
-**Build state:** Phase 6 complete. The executor runs through the first human gate, produces one asset at a time, critiques it, revises or replaces it when needed, and parks at the unbuilt `campaign_review` frontier for Phase 7.
+**Build state:** Phase 7 complete. The executor runs through both human gates, produces one asset at a time, critiques it, revises or replaces it when needed, reviews the passing portfolio, and parks at the unbuilt `finalize` frontier for Phase 9.
 
 ---
 
@@ -102,6 +102,16 @@ Agents call `lib/tools/` and nothing else. No agent file imports the Supabase cl
 **Revision credits are separate from planned asset credits.** A Critic revision increments `assets.revision_count` before production and reserves one additional credit through `begin_asset_revision`, inside Postgres. Re-entering while the asset is already `generating` is free. `MAX_REVISIONS_PER_ASSET` is checked in the graph, not in a prompt; when the limit is reached the asset becomes `abandoned` and is excluded from the eventual package.
 
 **Rejecting preserves history.** A rejected row is never overwritten. `select_alternative` asks the Strategist to choose from segments unused by every existing asset, replaces the rejected plan entry with a suffixed key such as `asset_1_alt_1`, and lets `produce` materialize the new row. If no candidate remains, the rejected row is abandoned. Rejected and abandoned rows stay visible in the dashboard and their reviews remain auditable.
+
+## Phase 7 decisions
+
+**The Campaign Reviewer owns the portfolio question.** The Critic sees one asset at a time. `campaign_review` sees only the current strategy's passing assets together, their Critic scorecards, and the unused segment pool. Its result is saved in `campaign_reviews` with one row per strategy version. A successful `agent_runs` row is replayed if the worker dies before that row is written.
+
+**Diversity is a code-enforced floor.** The Campaign Reviewer may return `APPROVE` or `REPLAN`, but TypeScript always routes a diversity score below 60 to `REPLAN`. If the model omits a valid replacement while a forced replan is possible, the runtime selects the first passing asset and first genuinely unused segment as a visible safety-net recommendation rather than approving a repetitive portfolio.
+
+**Replans are new strategy versions, not in-place edits.** The Strategist receives the scorecard and replacement instructions. Kept assets retain their original plan keys, type, platform, and source segment ids. Each replacement gets a deterministic unique suffix such as `asset_3_v2`; the old passing row is conditionally moved to `replaced` before the new strategy is saved. A retry reuses the successful replan run and repeats those conditional transitions safely.
+
+**The final gate resumes explicitly.** Final approval queues `finalize`, while final change requests are written to `agent_events` before the campaign is requeued at `replan`. `finalize` is intentionally still unregistered, so Phase 7 does not pretend to implement Phase 9 packaging.
 
 ## Phase 4 decisions
 

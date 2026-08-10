@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { StrategyPanel, type StrategyView } from '@/components/StrategyPanel';
 import { AssetCard, type AssetView } from '@/components/AssetCard';
+import { ApprovalGate } from '@/components/ApprovalGate';
+import { CampaignReviewCard, type CampaignReviewView } from '@/components/CampaignReviewCard';
 
 /**
  * Live view of one campaign.
@@ -78,6 +80,7 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
   const [transcript, setTranscript] = useState<TranscriptSummary | null>(null);
   const [segments, setSegments] = useState<SegmentRow[]>([]);
   const [strategy, setStrategy] = useState<StrategyView | null>(null);
+  const [campaignReview, setCampaignReview] = useState<CampaignReviewView | null>(null);
   const [assets, setAssets] = useState<AssetView[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -101,6 +104,7 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
           setTranscript(payload.transcript);
           setSegments(payload.segments ?? []);
           setStrategy(payload.strategy ?? null);
+          setCampaignReview(payload.campaign_review ?? null);
           const nextReviews = (payload.reviews ?? []) as ReviewRow[];
           setAssets(
             (payload.assets ?? []).map((asset: AssetView) => ({
@@ -252,6 +256,12 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
             ))}
           </div>
         </section>
+      )}
+
+      {campaignReview && <CampaignReviewCard review={campaignReview} />}
+
+      {campaign.status === 'awaiting_final_approval' && (
+        <ApprovalGate campaignId={campaignId} gate="final" />
       )}
 
       <Card>

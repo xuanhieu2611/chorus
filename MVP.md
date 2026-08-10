@@ -2,7 +2,7 @@
 
 Companion to `PRD.md`. The PRD says *what* and *why*. This document says *what exactly gets built, with which tools, in which order*.
 
-**Status:** Phase 6 complete, Phase 7 next
+**Status:** Phase 7 complete, Phase 8 next
 **Last updated:** 2026-08-10
 
 ---
@@ -869,9 +869,13 @@ Critic across both asset types. Threshold routing. Revision loop with a hard lim
 
 **Built.** `lib/agents/critic.ts` scores each asset in isolation and returns actionable feedback; TypeScript maps those scores to PASS, REVISE, or REJECT. Production now handles one asset at a time, so a REVISE visibly returns to the producer with the Critic's feedback and a one-credit revision reservation. Three revision attempts are hard-capped in code, and a REJECT preserves the old row while the Strategist selects an unused segment for a suffixed replacement plan. Assets that exhaust either path are marked `abandoned` and remain excluded from the eventual package. Review rows and scorecards are visible on the dashboard, including the score progression across revisions.
 
-### Phase 7 - Campaign Reviewer and replan
+### Phase 7 - Campaign Reviewer and replan ✅
 Cross-asset review, forced replan under diversity 60, replacement asset generation, final approval gate.
 **Done:** an intentionally repetitive campaign gets caught and one asset is replaced.
+
+**Built.** `lib/agents/campaign-reviewer.ts` scores the passing portfolio together and names the overlapping assets plus unused replacement segments. TypeScript owns the route: any diversity score below 60 forces `REPLAN`, and the result is durable per strategy version so retries reuse the paid review. Replans create a new strategy version, preserve removed passing assets as `replaced`, retain unchanged plan keys, and give replacements deterministic unique suffixes such as `asset_3_v2`. The replan output is validated against the previous plan and the unused segment pool before production resumes.
+
+Campaign Reviewer rows and Critic revision rows have unique idempotency keys. The final approval route resumes at `finalize` after approval, which remains intentionally unbuilt until Phase 9; a final change request writes durable feedback before resuming at `replan`.
 
 ### Phase 8 - Live graph and timeline
 `AgentGraph` with live node states and animated loop-back edges. Timeline filtering. Collapsible tool logs.
@@ -918,7 +922,7 @@ State these in the README. Naming your own limits reads as engineering maturity;
 
 Decide these when you reach them; none block Phase 0.
 
-1. **Idempotent replans.** When the Campaign Reviewer replaces an asset, `assets.plan_key` is unique per campaign. Either mark the old row `replaced` and suffix the new key (`asset_3_v2`), or version the assets table. Suffixing is simpler and preserves history for the timeline. Decide at Phase 7.
+1. ~~**Idempotent replans.**~~ **Resolved in Phase 7.** Replans mark the old asset `replaced`, preserve its reviews, and use a deterministic unique suffix such as `asset_3_v2` for the new plan key. Campaign review and revision rows also have unique idempotency keys.
 2. ~~**Structured output API.**~~ **Resolved in Phase 0.** `Output.object`, read from `result.output`, wrapped in `lib/llm/structured.ts`. The spike also established that strict schema mode is *not* in effect through OpenRouter, so the repair pass is the primary path. See `docs/ARCHITECTURE.md`.
 3. ~~**Model selection.**~~ **Resolved in Phase 0.** All three IDs verified against the OpenRouter models API on 2026-08-09. Added `MODEL_OVERRIDE_ALL` for cheap development runs; it must be unset for demos.
 4. **Dependency drift.** The versions in section 2 were verified 2026-08-09. If you start well after that, re-run the check before scaffolding rather than after.

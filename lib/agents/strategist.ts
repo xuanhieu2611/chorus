@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { callStructured } from '@/lib/llm/structured';
 import type { Json } from '@/lib/db/database.types';
 import type { SegmentRow } from '@/lib/db/client';
+import type { CampaignReview } from '@/lib/agents/campaign-reviewer';
 
 export const ASSET_TYPES = ['short_video', 'x_thread', 'linkedin_post'] as const;
 export const PLATFORMS = ['tiktok', 'x', 'linkedin'] as const;
@@ -24,6 +25,19 @@ export const StrategySchema = z.object({
 
 export type StrategyPlan = z.infer<typeof StrategySchema>;
 export type PlannedAsset = z.infer<typeof PlannedAssetSchema>;
+
+export interface ReplanInput extends StrategyConstraints {
+  campaignId: string;
+  previous: StrategyPlan;
+  review: CampaignReview;
+  segments: SegmentRow[];
+  targetVersion: number;
+  occupiedPlanKeys: string[];
+  humanFeedback?: string;
+  goal: string;
+  audience: string | null;
+  brandVoice: string | null;
+}
 
 export const AlternativeSchema = z.object({
   segment_id: z.string().trim().min(1),
@@ -64,6 +78,228 @@ export interface StrategistInput extends StrategyConstraints {
   audience: string | null;
   brandVoice: string | null;
   requiredChanges?: string[];
+}
+
+/**
+ * Revise only the assets the Campaign Reviewer marked for replacement. Kept
+ * plan keys and source ids are an idempotency boundary: their existing rows
+ * already contain paid output and must not be regenerated under a new key.
+ */
+export async function replanStrategy(input: ReplanInput): Promise<StrategyPlan> {
+  const replacements = input.review.recommendations.filter(
+    (recommendation) => recommendation.action === 'replace',
+  );
+  if (replacements.length === 0) {
+    throw new Error('Replan requires at least one replacement recommendation.');
+  }
+
+  const replacementKeys = replacementKeysFor(input);
+  const replacementInstructions = replacements.map((recommendation) => {
+    const replacementKey = replacementKeys.get(recommendation.plan_key)!;
+    return `- Replace ${recommendation.plan_key} with ${replacementKey}. Topic: ${recommendation.replacement_topic}. Exact unused segment ids: ${recommendation.replacement_segment_ids.join(', ')}.`;
+  });
+  const keepInstructions = input.previous.planned_assets
+    .filter((asset) => !replacementKeys.has(asset.plan_key))
+    .map(
+      (asset) =>
+        `- Keep ${asset.plan_key} exactly: type ${asset.type}, platform ${asset.platform}, source segment ids ${asset.segment_ids.join(', ')}.`,
+    );
+
+  let violations: string[] = [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await callStructured({
+      campaignId: input.campaignId,
+      agent: 'content_strategist',
+      node: 'replan',
+      role: 'reasoning',
+      schema: StrategySchema,
+      schemaName: 'campaign_replan',
+      schemaDescription: 'A revised campaign plan with unchanged kept assets and suffixed replacement keys.',
+      system: REPLAN_SYSTEM,
+      prompt: [
+        `Revise strategy v${input.targetVersion - 1} into strategy v${input.targetVersion}.`,
+        'The Campaign Reviewer found a portfolio-level problem. Replace only the named assets and preserve every other asset exactly so already-produced work remains reusable.',
+        '',
+        'Required replacements:',
+        ...replacementInstructions,
+        '',
+        'Assets that must remain unchanged:',
+        ...keepInstructions,
+        '',
+        'Previous plan:',
+        JSON.stringify(input.previous, null, 2),
+        '',
+        'Campaign Reviewer scorecard:',
+        JSON.stringify(input.review, null, 2),
+        ...(input.humanFeedback ? ['', `Human final-review feedback: ${input.humanFeedback}`] : []),
+        '',
+        'Source segments:',
+        renderSegments(input.segments, input.maxVideoSeconds),
+        ...(violations.length
+          ? [
+              '',
+              'Your previous plan violated these runtime constraints:',
+              ...violations.map((violation) => `- ${violation}`),
+              'Return a corrected plan. This is the final retry.',
+            ]
+          : []),
+        '',
+        describeObjective(input),
+      ].join('\n'),
+      input: {
+        from_strategy_version: input.targetVersion - 1,
+        target_strategy_version: input.targetVersion,
+        replacement_keys: Object.fromEntries(replacementKeys),
+        previous_plan: input.previous,
+        campaign_review: input.review,
+        human_feedback: input.humanFeedback ?? null,
+      } as Json,
+    });
+
+    violations = validateReplan(result.value, input);
+    if (violations.length === 0) return normalizeReplan(result.value, input);
+  }
+
+  throw new Error(`Content Strategist could not produce a legal replan: ${violations.join('; ')}`);
+}
+
+/** Pure semantic checks for a replan. Exported so the relationship contract is
+ * testable without paying for a model call. */
+export function validateReplan(plan: StrategyPlan, input: ReplanInput): string[] {
+  const violations = validateStrategy(plan, input.segments, input);
+  const replacementKeys = replacementKeysFor(input);
+  const previousByKey = new Map(input.previous.planned_assets.map((asset) => [asset.plan_key, asset]));
+  const actualByKey = new Map(plan.planned_assets.map((asset) => [asset.plan_key, asset]));
+
+  for (const previous of input.previous.planned_assets) {
+    const replacementKey = replacementKeys.get(previous.plan_key);
+    if (replacementKey) {
+      if (actualByKey.has(previous.plan_key)) {
+        violations.push(`${previous.plan_key} must be removed from the revised plan`);
+      }
+      const replacement = actualByKey.get(replacementKey);
+      if (!replacement) {
+        violations.push(`replacement ${replacementKey} is missing from the revised plan`);
+        continue;
+      }
+      if (replacement.type !== previous.type || replacement.platform !== previous.platform) {
+        violations.push(`${replacementKey} must keep type ${previous.type} and platform ${previous.platform}`);
+      }
+      const recommendation = input.review.recommendations.find(
+        (item) => item.action === 'replace' && item.plan_key === previous.plan_key,
+      );
+      if (
+        recommendation &&
+        !sameIds(replacement.segment_ids, recommendation.replacement_segment_ids)
+      ) {
+        violations.push(`${replacementKey} must use the Reviewer's replacement segment ids`);
+      }
+      continue;
+    }
+
+    const kept = actualByKey.get(previous.plan_key);
+    if (!kept) {
+      violations.push(`kept asset ${previous.plan_key} is missing from the revised plan`);
+      continue;
+    }
+    if (
+      kept.type !== previous.type ||
+      kept.platform !== previous.platform ||
+      !sameIds(kept.segment_ids, previous.segment_ids)
+    ) {
+      violations.push(`${previous.plan_key} changed even though the Reviewer did not replace it`);
+    }
+  }
+
+  const expectedKeys = new Set(
+    input.previous.planned_assets.map((asset) => replacementKeys.get(asset.plan_key) ?? asset.plan_key),
+  );
+  for (const key of actualByKey.keys()) {
+    if (!expectedKeys.has(key)) violations.push(`unexpected plan key ${key} appeared in the revised plan`);
+  }
+  for (const key of expectedKeys) {
+    if (!actualByKey.has(key)) violations.push(`expected plan key ${key} is missing from the revised plan`);
+  }
+
+  // Keep this lookup in the validation path so a future caller cannot pass a
+  // recommendation for a plan key that was not in the source strategy.
+  for (const recommendation of input.review.recommendations) {
+    if (recommendation.action === 'replace' && !previousByKey.has(recommendation.plan_key)) {
+      violations.push(`Reviewer replacement targets unknown plan key ${recommendation.plan_key}`);
+    }
+  }
+
+  return violations;
+}
+
+/** Stable, collision-free suffix for a replacement plan key. */
+export function replacementPlanKey(
+  oldPlanKey: string,
+  targetVersion: number,
+  occupiedPlanKeys: Iterable<string>,
+): string {
+  const occupied = new Set(occupiedPlanKeys);
+  const base = `${oldPlanKey}_v${targetVersion}`;
+  let candidate = base;
+  let suffix = 2;
+  while (occupied.has(candidate)) {
+    candidate = `${base}_${suffix}`;
+    suffix++;
+  }
+  return candidate;
+}
+
+function replacementKeysFor(input: ReplanInput): Map<string, string> {
+  const occupied = new Set([
+    ...input.occupiedPlanKeys,
+    ...input.previous.planned_assets.map((asset) => asset.plan_key),
+  ]);
+  const keys = new Map<string, string>();
+  for (const recommendation of input.review.recommendations) {
+    if (recommendation.action !== 'replace' || keys.has(recommendation.plan_key)) continue;
+    const replacement = replacementPlanKey(
+      recommendation.plan_key,
+      input.targetVersion,
+      occupied,
+    );
+    keys.set(recommendation.plan_key, replacement);
+    occupied.add(replacement);
+  }
+  return keys;
+}
+
+function normalizeReplan(plan: StrategyPlan, input: ReplanInput): StrategyPlan {
+  const replacementKeys = replacementKeysFor(input);
+  const generatedByKey = new Map(plan.planned_assets.map((asset) => [asset.plan_key, asset]));
+
+  return {
+    rationale: plan.rationale.trim(),
+    planned_assets: input.previous.planned_assets.map((previous) => {
+      const replacementKey = replacementKeys.get(previous.plan_key);
+      if (!replacementKey) return previous;
+
+      const recommendation = input.review.recommendations.find(
+        (item) => item.action === 'replace' && item.plan_key === previous.plan_key,
+      );
+      const generated = generatedByKey.get(replacementKey);
+      return {
+        ...previous,
+        plan_key: replacementKey,
+        topic: generated?.topic.trim() || recommendation?.replacement_topic || previous.topic,
+        purpose: generated?.purpose.trim() || previous.purpose,
+        segment_ids: recommendation?.replacement_segment_ids ?? previous.segment_ids,
+        credits: CREDIT_COST[previous.type],
+      };
+    }),
+    rejected_topics: plan.rejected_topics.map((item) => ({
+      topic: item.topic.trim(),
+      reason: item.reason.trim(),
+    })),
+  };
+}
+
+function sameIds(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((id) => right.includes(id));
 }
 
 /**
@@ -370,6 +606,13 @@ const ALTERNATIVE_SYSTEM = [
   'You are the Content Strategist selecting a replacement for one rejected asset.',
   'Choose a genuinely unused source segment that can perform the same platform job while avoiding the rejected idea’s weakness.',
   'Never invent a segment id. The runtime will reject anything outside the supplied candidate pool.',
+].join('\n');
+
+const REPLAN_SYSTEM = [
+  'You are the Content Strategist revising a campaign after a portfolio review.',
+  'Replace only the named assets. Keep every other plan key, asset type, platform, and source segment id exactly unchanged.',
+  'Use the exact suffixed replacement plan keys and unused segment ids supplied by the runtime. Do not invent ids or add assets.',
+  'The replacement should have a clear purpose for the campaign objective and a topic that matches the supplied source segment.',
 ].join('\n');
 
 function describeObjective(input: Pick<StrategistInput, 'goal' | 'audience' | 'brandVoice'>): string {

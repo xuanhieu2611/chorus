@@ -11,6 +11,8 @@
  * versioned strategy, Phase 4 added durable assets with atomic credit
  * reservation, Phase 5 added draft inspection, subtitle, render, and upload tools,
  * and Phase 6 added Critic reviews, revision transitions, and alternative segments.
+ * Phase 7 adds the portfolio review, durable replan memory, and final approval
+ * feedback reads.
  */
 export { getTranscript, hasTranscript, saveTranscript, type Transcript } from '@/lib/tools/transcript';
 export {
@@ -41,6 +43,7 @@ export {
   getCampaignAssets,
   markAssetPassed,
   markAssetRejected,
+  markAssetReplaced,
   prepareAssetRevision,
   saveVideoAsset,
   saveWrittenAsset,
@@ -58,6 +61,12 @@ export {
 } from '@/lib/tools/video';
 export {
   getAlternativeRun,
+  getCampaignReview,
+  getCampaignReviewRun,
+  getFinalApprovalFeedback,
+  getLatestCampaignReview,
+  getReplanRun,
+  recordCampaignReview,
   getCriticRun,
   getLatestReview,
   recordReview,

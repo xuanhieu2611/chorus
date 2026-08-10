@@ -109,6 +109,24 @@ export async function markAssetRejected(assetId: string): Promise<AssetRow> {
   return transitionAsset(assetId, 'rejected', ['needs_review', 'rejected']);
 }
 
+/** Preserve a passing asset as history when a campaign-level replan replaces it. */
+export async function markAssetReplaced(assetId: string): Promise<AssetRow> {
+  const { data, error } = await db()
+    .from('assets')
+    .update({ status: 'replaced', updated_at: new Date().toISOString() })
+    .eq('id', assetId)
+    .in('status', ['passed', 'replaced'])
+    .select()
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to preserve replaced asset: ${error.message}`);
+  if (data) return data;
+
+  const current = await getAsset(assetId);
+  if (current.status === 'replaced') return current;
+  throw new Error(`Asset ${assetId} cannot become replaced from status ${current.status}.`);
+}
+
 /**
  * Prepare one revision after a REVISE review. The conditional update makes the
  * increment idempotent if the worker dies after this node commits but before it
