@@ -9,12 +9,14 @@
  *
  * Phase 1 exposed the transcript, Phase 2 added segments, Phase 3 added the
  * versioned strategy, Phase 4 added durable assets with atomic credit
- * reservation, and Phase 5 added draft inspection, subtitle, render, and upload tools.
+ * reservation, Phase 5 added draft inspection, subtitle, render, and upload tools,
+ * and Phase 6 added Critic reviews, revision transitions, and alternative segments.
  */
 export { getTranscript, hasTranscript, saveTranscript, type Transcript } from '@/lib/tools/transcript';
 export {
   countSegments,
   getSegments,
+  getUnusedSegments,
   readSegment,
   saveSegments,
   type ReadSegmentResult,
@@ -26,13 +28,20 @@ export {
   getRevisionRequest,
   markStrategyApproved,
   planFromStrategy,
+  replacePlannedAsset,
   saveStrategy,
   type RevisionRequest,
 } from '@/lib/tools/strategies';
 export {
+  abandonAsset,
   beginAssetGeneration,
+  beginAssetRevision,
   ensurePlannedAssets,
+  getAsset,
   getCampaignAssets,
+  markAssetPassed,
+  markAssetRejected,
+  prepareAssetRevision,
   saveVideoAsset,
   saveWrittenAsset,
   type AssetStatus,
@@ -47,3 +56,10 @@ export {
   renderVerticalVideo,
   uploadAsset,
 } from '@/lib/tools/video';
+export {
+  getAlternativeRun,
+  getCriticRun,
+  getLatestReview,
+  recordReview,
+  type RecordReviewInput,
+} from '@/lib/tools/reviews';

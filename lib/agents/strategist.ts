@@ -25,6 +25,25 @@ export const StrategySchema = z.object({
 export type StrategyPlan = z.infer<typeof StrategySchema>;
 export type PlannedAsset = z.infer<typeof PlannedAssetSchema>;
 
+export const AlternativeSchema = z.object({
+  segment_id: z.string().trim().min(1),
+  reasoning: z.string().trim().min(1),
+});
+
+export type AlternativeSelection = z.infer<typeof AlternativeSchema>;
+
+export interface AlternativeInput {
+  campaignId: string;
+  planKey: string;
+  rejectedTopic: string;
+  rejectionFeedback: string;
+  assetType: PlannedAsset['type'];
+  candidates: SegmentRow[];
+  goal: string;
+  audience: string | null;
+  brandVoice: string | null;
+}
+
 export const CREDIT_COST: Record<PlannedAsset['type'], number> = {
   short_video: 3,
   x_thread: 2,
@@ -130,6 +149,64 @@ export async function createStrategy(input: StrategistInput): Promise<StrategyPl
   throw new Error(`Content Strategist could not produce a legal plan: ${violations.join('; ')}`);
 }
 
+/** Pick one genuinely unused source segment for an asset the Critic rejected. */
+export async function selectAlternative(input: AlternativeInput): Promise<AlternativeSelection> {
+  if (input.candidates.length === 0) {
+    throw new Error(`No unused segment is available for ${input.planKey}.`);
+  }
+
+  const candidateIds = new Set(input.candidates.map((segment) => segment.id));
+  let violations: string[] = [];
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await callStructured({
+      campaignId: input.campaignId,
+      agent: 'content_strategist',
+      node: 'select_alternative',
+      role: 'reasoning',
+      schema: AlternativeSchema,
+      schemaName: 'alternative_segment_selection',
+      schemaDescription: 'One unused source segment that can replace a rejected asset.',
+      system: ALTERNATIVE_SYSTEM,
+      prompt: [
+        `Choose a replacement source segment for rejected plan ${input.planKey}.`,
+        `Original topic: ${input.rejectedTopic}`,
+        `Original asset type: ${input.assetType}`,
+        `Why the Critic rejected it: ${input.rejectionFeedback}`,
+        '',
+        'Choose exactly one segment from this unused pool. The replacement should do the same platform job with a distinctly stronger source moment. Return the segment id exactly as shown.',
+        ...input.candidates.map((segment) => renderAlternativeCandidate(segment)),
+        ...(violations.length
+          ? [
+              '',
+              'Your previous selection was invalid:',
+              ...violations.map((violation) => `- ${violation}`),
+              'Return a corrected selection from the candidate pool.',
+            ]
+          : []),
+        '',
+        describeObjective(input),
+      ].join('\n'),
+      input: {
+        plan_key: input.planKey,
+        rejected_topic: input.rejectedTopic,
+        rejection_feedback: input.rejectionFeedback,
+        asset_type: input.assetType,
+        candidate_ids: input.candidates.map((segment) => segment.id),
+        selection_attempt: attempt + 1,
+      } as Json,
+    });
+
+    violations = [];
+    if (!candidateIds.has(result.value.segment_id)) {
+      violations.push(`segment_id ${result.value.segment_id} is not in the unused candidate pool`);
+    }
+    if (violations.length === 0) return result.value;
+  }
+
+  throw new Error(`Content Strategist could not select a valid alternative: ${violations.join('; ')}`);
+}
+
 /** Pure runtime validation, exported because budget failures are too expensive
  * to test by making real model calls. */
 export function validateStrategy(
@@ -227,6 +304,17 @@ function platformFor(type: PlannedAsset['type']): PlannedAsset['platform'] {
   return 'linkedin';
 }
 
+function renderAlternativeCandidate(segment: SegmentRow): string {
+  const duration = Number(segment.end_time) - Number(segment.start_time);
+  return [
+    `# ${segment.id}`,
+    `  ${Number(segment.start_time).toFixed(1)}-${Number(segment.end_time).toFixed(1)}s (${duration.toFixed(1)}s) | ${segment.content_type}`,
+    `  topic: ${segment.topic}`,
+    `  summary: ${(segment.summary ?? '').slice(0, 200)}`,
+    `  scores: standalone ${score(segment.standalone_score)}, novelty ${score(segment.novelty_score)}, energy ${score(segment.energy)}`,
+  ].join('\n');
+}
+
 function renderSegments(segments: SegmentRow[], maxVideoSeconds: number): string {
   return segments
     .map((segment) => {
@@ -276,6 +364,12 @@ const STRATEGIST_SYSTEM = [
   'Exercise editorial judgement. Select a small portfolio whose assets do different jobs for the objective, rather than mechanically turning every high score into content.',
   'The rejected list matters as much as the selected list: name attractive ideas you are deliberately leaving out and the tradeoff behind each decision.',
   'Budget and platform constraints are hard runtime rules. Never invent source segment ids.',
+].join('\n');
+
+const ALTERNATIVE_SYSTEM = [
+  'You are the Content Strategist selecting a replacement for one rejected asset.',
+  'Choose a genuinely unused source segment that can perform the same platform job while avoiding the rejected idea’s weakness.',
+  'Never invent a segment id. The runtime will reject anything outside the supplied candidate pool.',
 ].join('\n');
 
 function describeObjective(input: Pick<StrategistInput, 'goal' | 'audience' | 'brandVoice'>): string {

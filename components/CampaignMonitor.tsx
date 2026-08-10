@@ -39,6 +39,17 @@ interface EventRow {
   created_at: string;
 }
 
+interface ReviewRow {
+  id: string;
+  asset_id: string;
+  reviewer_agent: string;
+  scores: unknown;
+  feedback: string;
+  decision: 'PASS' | 'REVISE' | 'REJECT';
+  revision_index: number;
+  created_at: string;
+}
+
 interface TranscriptSummary {
   language: string | null;
   provider: string;
@@ -90,7 +101,13 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
           setTranscript(payload.transcript);
           setSegments(payload.segments ?? []);
           setStrategy(payload.strategy ?? null);
-          setAssets(payload.assets ?? []);
+          const nextReviews = (payload.reviews ?? []) as ReviewRow[];
+          setAssets(
+            (payload.assets ?? []).map((asset: AssetView) => ({
+              ...asset,
+              reviews: nextReviews.filter((review) => review.asset_id === asset.id),
+            })),
+          );
           if (payload.events.length > 0) {
             setEvents((previous) => [...previous, ...payload.events]);
             cursor.current = payload.events[payload.events.length - 1].id;

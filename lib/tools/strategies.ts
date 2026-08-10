@@ -1,6 +1,10 @@
 import { db, type StrategyRow } from '@/lib/db/client';
 import { DirectorSchema, type DirectorReview } from '@/lib/agents/director';
-import { StrategySchema, type StrategyPlan } from '@/lib/agents/strategist';
+import {
+  StrategySchema,
+  type PlannedAsset,
+  type StrategyPlan,
+} from '@/lib/agents/strategist';
 import type { Json } from '@/lib/db/database.types';
 
 export interface RevisionRequest {
@@ -60,6 +64,42 @@ export function planFromStrategy(row: StrategyRow): StrategyPlan {
     throw new Error(`Strategy v${row.version} in the database is invalid: ${parsed.error.message}`);
   }
   return parsed.data;
+}
+
+/** Replace one rejected plan entry while preserving its asset row and reviews. */
+export async function replacePlannedAsset(
+  strategy: StrategyRow,
+  oldPlanKey: string,
+  replacement: PlannedAsset,
+): Promise<StrategyRow> {
+  const plan = planFromStrategy(strategy);
+  const index = plan.planned_assets.findIndex((asset) => asset.plan_key === oldPlanKey);
+  if (index < 0) throw new Error(`Strategy v${strategy.version} has no ${oldPlanKey} to replace.`);
+  if (plan.planned_assets.some((asset) => asset.plan_key === replacement.plan_key)) {
+    throw new Error(`Strategy v${strategy.version} already contains ${replacement.plan_key}.`);
+  }
+
+  const plannedAssets = plan.planned_assets.map((asset, assetIndex) =>
+    assetIndex === index ? replacement : asset,
+  );
+  const selectedTopics = plannedAssets.map((asset) => ({
+    topic: asset.topic,
+    segment_ids: asset.segment_ids,
+    plan_key: asset.plan_key,
+  }));
+
+  const { data, error } = await db()
+    .from('strategies')
+    .update({
+      planned_assets: plannedAssets as Json,
+      selected_topics: selectedTopics as Json,
+    })
+    .eq('id', strategy.id)
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to save alternative plan for ${oldPlanKey}: ${error.message}`);
+  return data;
 }
 
 export async function markStrategyApproved(

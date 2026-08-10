@@ -43,6 +43,7 @@ export interface WriterInput {
   goal: string;
   audience: string | null;
   brandVoice: string | null;
+  revisionFeedback?: string | null;
 }
 
 /**
@@ -96,6 +97,13 @@ export async function writeAsset(input: WriterInput): Promise<WrittenAsset> {
         '- Every source_quote must copy one contiguous span from a single <quote> above, without the tags or id.',
         '- You may shorten a listed quote only by removing whole words from its beginning or end. Never join quotes, insert ellipses, fix grammar, or change a word.',
         '- Claims may synthesize the source, but may not add facts the source does not support.',
+        ...(input.revisionFeedback
+          ? [
+              '',
+              'The Content Critic reviewed the previous attempt. Fix this specific issue while preserving the source grounding:',
+              `- ${input.revisionFeedback}`,
+            ]
+          : []),
         ...(groundingFailures.length
           ? [
               '',
@@ -113,6 +121,7 @@ export async function writeAsset(input: WriterInput): Promise<WrittenAsset> {
         topic: input.topic,
         purpose: input.purpose,
         source_segment_ids: input.sources.map((source) => source.id),
+        revision_feedback: input.revisionFeedback ?? null,
         grounding_attempt: attempt + 1,
         previous_grounding_failures: groundingFailures,
       } as Json,

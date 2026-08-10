@@ -47,6 +47,7 @@ export interface ClipProducerInput {
   goal: string;
   audience: string | null;
   brandVoice: string | null;
+  revisionFeedback?: string | null;
 }
 
 export interface ProducedClip {
@@ -210,6 +211,13 @@ async function chooseClipPlan(
       'clip_start and clip_end must use the absolute source timestamps printed below and must stay inside one excerpt.',
       'Start as close as possible to the first line that earns attention. End after the payoff, not during the next setup.',
       'Write a hook of at most 90 characters for a three-second overlay and a platform caption of at most 2,200 characters.',
+      ...(input.revisionFeedback
+        ? [
+            '',
+            'The Content Critic reviewed the previous attempt. Make this concrete correction in the new plan:',
+            `- ${input.revisionFeedback}`,
+          ]
+        : []),
       '',
       ...sources.map((source) => renderSource(source)),
       '',
@@ -219,6 +227,7 @@ async function chooseClipPlan(
       plan_key: input.planKey,
       source_segment_ids: input.segmentIds,
       max_video_seconds: input.maxVideoSeconds,
+      revision_feedback: input.revisionFeedback ?? null,
     } as Json,
   });
   return result.value;

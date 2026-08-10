@@ -14,6 +14,18 @@ export interface AssetView {
   status: string;
   revision_count: number;
   updated_at: string;
+  reviews?: AssetReviewView[];
+}
+
+export interface AssetReviewView {
+  id: string;
+  asset_id: string;
+  reviewer_agent: string;
+  scores: unknown;
+  feedback: string;
+  decision: 'PASS' | 'REVISE' | 'REJECT';
+  revision_index: number;
+  created_at: string;
 }
 
 export interface AssetSourceView {
@@ -36,6 +48,8 @@ export function AssetCard({
   sources: AssetSourceView[];
 }) {
   const content = parseContent(asset.content);
+  const latestReview = asset.reviews?.[asset.reviews.length - 1] ?? null;
+  const scores = latestReview ? parseScores(latestReview.scores) : null;
   const sourceById = new Map(sources.map((source) => [source.id, source]));
   const selectedSources = asset.source_segment_ids.flatMap((id) => {
     const source = sourceById.get(id);
@@ -49,9 +63,7 @@ export function AssetCard({
           <CardTitle className="text-base">{label(asset.type)}</CardTitle>
           <div className="flex items-center gap-2">
             <Badge variant="outline">{asset.platform}</Badge>
-            <Badge variant={asset.status === 'needs_review' ? 'default' : 'secondary'}>
-              {asset.status.replace(/_/g, ' ')}
-            </Badge>
+            <Badge variant={statusVariant(asset.status)}>{asset.status.replace(/_/g, ' ')}</Badge>
           </div>
         </div>
         <div>
@@ -124,6 +136,37 @@ export function AssetCard({
         {!content && (
           <p className="text-muted-foreground text-sm">
             {asset.type === 'short_video' ? 'Waiting for the Clip Producer.' : 'Waiting for the Writing Agent.'}
+          </p>
+        )}
+
+        {latestReview && scores && (
+          <div className="rounded-lg border border-sky-500/25 bg-sky-500/5 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-semibold tracking-wide uppercase">Critic review</p>
+              <Badge variant={reviewVariant(latestReview.decision)}>
+                {latestReview.decision} · {average(scores).toFixed(1)}/10
+              </Badge>
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+              {Object.entries(scores).map(([key, value]) => (
+                <div key={key} className="bg-background/70 rounded border px-2 py-1.5">
+                  <p className="text-muted-foreground">{key.replace(/_/g, ' ')}</p>
+                  <p className="font-mono font-medium">{value.toFixed(1)}</p>
+                </div>
+              ))}
+            </div>
+            <p className="text-muted-foreground mt-3 text-xs leading-5">{latestReview.feedback}</p>
+            {asset.revision_count > 0 && (
+              <p className="text-muted-foreground mt-2 font-mono text-[10px]">
+                revision {asset.revision_count}
+              </p>
+            )}
+          </div>
+        )}
+
+        {asset.reviews && asset.reviews.length > 1 && (
+          <p className="text-muted-foreground rounded-lg border px-3 py-2 font-mono text-[10px]">
+            Score history: {scoreHistory(asset.reviews)}
           </p>
         )}
 
@@ -210,6 +253,62 @@ function parseGrounding(value: unknown): GroundingView[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function statusVariant(
+  status: string,
+): 'default' | 'secondary' | 'destructive' | 'outline' {
+  if (status === 'rejected' || status === 'abandoned') return 'destructive';
+  if (status === 'passed') return 'default';
+  if (status === 'needs_review') return 'outline';
+  return 'secondary';
+}
+
+function reviewVariant(
+  decision: AssetReviewView['decision'],
+): 'default' | 'secondary' | 'destructive' | 'outline' {
+  if (decision === 'PASS') return 'default';
+  if (decision === 'REJECT') return 'destructive';
+  return 'outline';
+}
+
+interface CriticScoresView {
+  hook: number;
+  clarity: number;
+  standalone: number;
+  originality: number;
+  audience_fit: number;
+  payoff: number;
+}
+
+function parseScores(value: unknown): CriticScoresView | null {
+  if (!isRecord(value)) return null;
+  const keys: Array<keyof CriticScoresView> = [
+    'hook',
+    'clarity',
+    'standalone',
+    'originality',
+    'audience_fit',
+    'payoff',
+  ];
+  if (!keys.every((key) => typeof value[key] === 'number')) return null;
+  return value as unknown as CriticScoresView;
+}
+
+function average(scores: CriticScoresView): number {
+  return Object.values(scores).reduce((sum, value) => sum + value, 0) / 6;
+}
+
+function scoreHistory(reviews: AssetReviewView[]): string {
+  return reviews
+    .map((review) => {
+      const scores = parseScores(review.scores);
+      return scores
+        ? `r${review.revision_index}: ${average(scores).toFixed(1)} (${review.decision})`
+        : null;
+    })
+    .filter((value): value is string => value !== null)
+    .join(' → ');
 }
 
 function label(type: string): string {

@@ -79,6 +79,24 @@ export async function countSegments(campaignId: string): Promise<number> {
 }
 
 /**
+ * Segment candidates not already assigned to an asset. Rejected and abandoned
+ * assets count as used too: an alternative should be genuinely new rather than
+ * quietly replaying a failed source moment.
+ */
+export async function getUnusedSegments(campaignId: string): Promise<SegmentRow[]> {
+  const [segmentsResult, assetsResult] = await Promise.all([
+    db().from('segments').select('*').eq('campaign_id', campaignId).order('start_time', { ascending: true }),
+    db().from('assets').select('source_segment_ids').eq('campaign_id', campaignId),
+  ]);
+
+  if (segmentsResult.error) throw new Error(`Failed to read segment pool: ${segmentsResult.error.message}`);
+  if (assetsResult.error) throw new Error(`Failed to read used segment ids: ${assetsResult.error.message}`);
+
+  const used = new Set((assetsResult.data ?? []).flatMap((asset) => asset.source_segment_ids ?? []));
+  return (segmentsResult.data ?? []).filter((segment) => !used.has(segment.id));
+}
+
+/**
  * Replace a campaign's segments with a fresh analysis.
  *
  * Delete-then-insert rather than upsert, because segment ids are generated and a

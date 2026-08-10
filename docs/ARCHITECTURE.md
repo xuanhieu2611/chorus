@@ -2,7 +2,7 @@
 
 Mirrors `MVP.md` section 6. **Changing `lib/graph/nodes.ts` means updating this diagram in the same commit**, and `components/AgentGraph.tsx` renders the same node set live.
 
-**Build state:** Phase 5 complete. The executor runs through the first human gate and produces grounded writing plus rendered short videos. Both video and audio-only sources finish as 9:16 MP4s with burned word captions, then the campaign parks at the unbuilt `critique` node for Phase 6.
+**Build state:** Phase 6 complete. The executor runs through the first human gate, produces one asset at a time, critiques it, revises or replaces it when needed, and parks at the unbuilt `campaign_review` frontier for Phase 7.
 
 ---
 
@@ -92,6 +92,16 @@ Agents call `lib/tools/` and nothing else. No agent file imports the Supabase cl
 **Caption burning requires libass.** Homebrew's regular `ffmpeg` 8.1.2 bottle does not include the `ass` filter even though the original prerequisite assumed it did. Phase 5 uses keg-only `ffmpeg-full`, and `.env.example` points to `/opt/homebrew/opt/ffmpeg-full/bin`. This was found by running the render test, not by inspecting a nominal version string.
 
 **Only rendered clips leave local disk.** Drafts, frames, captions, and final scratch files live under `work/{campaignId}/assets/{planKey}`. The final MP4 is uploaded idempotently to the public Supabase `assets` bucket and its URL plus local relative path are saved atomically with the asset's `needs_review` transition. Source media remains local and never approaches Supabase's 50 MB object limit.
+
+## Phase 6 decisions
+
+**The Critic does not own control flow.** `content_critic` returns six 1-to-10 scores and actionable feedback for one asset. TypeScript routes the result: any score at or below 3 is `REJECT`, an average of at least 7 with no score below 5 is `PASS`, and everything else is `REVISE`. The decision is stored in `reviews`, so a worker retry can apply the same edge without buying a second judgement.
+
+**Production is one asset at a time.** `produce` selects the first planned, revising, or in-progress row that is not terminal, then returns to `critique` as soon as that row is durable. A worker crash after a model call can reuse the successful `agent_runs` output, and a crash after rendering sees `needs_review` rather than generating the same asset again. This is the loop the dashboard can show rather than a bulk production phase hidden behind one status.
+
+**Revision credits are separate from planned asset credits.** A Critic revision increments `assets.revision_count` before production and reserves one additional credit through `begin_asset_revision`, inside Postgres. Re-entering while the asset is already `generating` is free. `MAX_REVISIONS_PER_ASSET` is checked in the graph, not in a prompt; when the limit is reached the asset becomes `abandoned` and is excluded from the eventual package.
+
+**Rejecting preserves history.** A rejected row is never overwritten. `select_alternative` asks the Strategist to choose from segments unused by every existing asset, replaces the rejected plan entry with a suffixed key such as `asset_1_alt_1`, and lets `produce` materialize the new row. If no candidate remains, the rejected row is abandoned. Rejected and abandoned rows stay visible in the dashboard and their reviews remain auditable.
 
 ## Phase 4 decisions
 

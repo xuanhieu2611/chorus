@@ -1,7 +1,15 @@
 import { mkdir, stat } from 'node:fs/promises';
+import type { AssetRow, SegmentRow } from '@/lib/db/client';
+import type { Json } from '@/lib/db/database.types';
+import { CriticSchema, critiqueAsset, decideCritic, type CriticReview } from '@/lib/agents/critic';
 import { reviewStrategy } from '@/lib/agents/director';
 import { analyzeSource } from '@/lib/agents/source-analyst';
-import { createStrategy } from '@/lib/agents/strategist';
+import {
+  CREDIT_COST,
+  createStrategy,
+  selectAlternative,
+  type PlannedAsset,
+} from '@/lib/agents/strategist';
 import { produceClip } from '@/lib/agents/clip-producer';
 import { writeAsset, type WrittenAssetType } from '@/lib/agents/writer';
 import { emit } from '@/lib/events';
@@ -15,17 +23,29 @@ import {
 } from '@/lib/media/paths';
 import { PROVIDER, transcribeAudio } from '@/lib/media/transcribe';
 import {
+  abandonAsset,
   beginAssetGeneration,
+  beginAssetRevision,
   countSegments,
   ensurePlannedAssets,
+  getAlternativeRun,
+  getCampaignAssets,
+  getCriticRun,
   getDirectorReview,
+  getLatestReview,
   getLatestStrategy,
   getRevisionRequest,
   getSegments,
   getTranscript,
+  getUnusedSegments,
   hasTranscript,
+  markAssetPassed,
+  markAssetRejected,
   markStrategyApproved,
   planFromStrategy,
+  prepareAssetRevision,
+  recordReview,
+  replacePlannedAsset,
   saveSegments,
   saveStrategy,
   saveTranscript,
@@ -39,12 +59,11 @@ import type { NodeFn, NodeId, NodeResult } from '@/lib/graph/types';
  * `lib/graph/run.ts` only walks the edges these functions return.
  *
  * Built so far: `ingest` and `transcribe` (Phase 1), `analyze` (Phase 2),
- * `strategize`, `director_review_plan`, and the first gate (Phase 3), the
- * Writing Agent branch of `produce` (Phase 4), and the Clip Producer (Phase 5).
- * Nodes for later phases are absent
- * from the registry rather than stubbed, and
- * `run.ts` stops cleanly when it reaches one. A plausible empty stub is worse
- * than a missing entry because it makes an unbuilt phase look complete.
+ * `strategize`, `director_review_plan`, and the first gate (Phase 3), grounded
+ * writing (Phase 4), the Clip Producer (Phase 5), and the Critic loop (Phase 6).
+ * The Campaign Reviewer frontier remains absent from the registry rather than
+ * stubbed, so `run.ts` stops cleanly when it reaches it. A plausible empty stub
+ * is worse than a missing entry because it makes an unbuilt phase look complete.
  */
 
 /**
@@ -409,11 +428,9 @@ const awaitStrategyApproval: NodeFn = async (): Promise<NodeResult> => ({
 });
 
 /**
- * Materialize the approved plan and produce every asset while the Critic is not
- * built yet. Writing uses verbatim excerpts. Video runs the full draft,
- * inspect, word-boundary adjustment, vertical render, caption burn, and upload
- * path. Phase 6 narrows this temporary sweep to the graph's final one-asset-at-a-time
- * produce/critique loop.
+ * Produce exactly one asset, then hand it to the Critic. Keeping the unit of
+ * work this small is what makes the revision edge visible and resumable: a
+ * worker crash never needs to guess which item in a bulk sweep was being judged.
  */
 const produce: NodeFn = async (ctx): Promise<NodeResult> => {
   const { campaign, campaignId } = ctx;
@@ -428,51 +445,59 @@ const produce: NodeFn = async (ctx): Promise<NodeResult> => {
     ensurePlannedAssets(campaignId, plan.planned_assets),
     getSegments(campaignId),
   ]);
-  const segmentById = new Map(segments.map((segment) => [segment.id, segment]));
   const assetByKey = new Map(assets.map((asset) => [asset.plan_key, asset]));
-  let produced = 0;
-  let reused = 0;
+  const planned = plan.planned_assets.find((candidate) => {
+    const asset = assetByKey.get(candidate.plan_key);
+    return asset && ACTIVE_ASSET_STATUSES.has(asset.status);
+  });
 
-  for (const planned of plan.planned_assets) {
-    if (!isWrittenType(planned.type)) continue;
-    const asset = assetByKey.get(planned.plan_key);
-    if (!asset) throw new Error(`No asset row exists for ${planned.plan_key}.`);
+  if (!planned) {
+    return {
+      next: 'campaign_review',
+      reason: 'Every planned asset has passed, been abandoned, or been rejected. The portfolio is ready for Campaign Reviewer review.',
+    };
+  }
 
-    if (asset.status === 'needs_review' && asset.content) {
-      reused++;
-      continue;
-    }
-    if (asset.status !== 'planned' && asset.status !== 'generating') {
-      throw new Error(
-        `Written asset ${planned.plan_key} cannot be produced from status ${asset.status}.`,
-      );
-    }
+  const asset = assetByKey.get(planned.plan_key);
+  if (!asset) throw new Error(`No asset row exists for ${planned.plan_key}.`);
 
-    const sources = planned.segment_ids.map((id) => {
-      const segment = segmentById.get(id);
-      if (!segment) throw new Error(`Writing plan ${planned.plan_key} references missing segment ${id}.`);
-      return {
-        id: segment.id,
-        startTime: Number(segment.start_time),
-        endTime: Number(segment.end_time),
-        transcript: segment.transcript,
-      };
-    });
+  if (asset.status === 'needs_review' && hasGeneratedOutput(asset, planned.type)) {
+    return {
+      next: 'critique',
+      reason: `${planned.plan_key} already has durable output from an earlier run; sending it to the Critic without generating it again.`,
+    };
+  }
+  if (asset.status !== 'planned' && asset.status !== 'revising' && asset.status !== 'generating') {
+    throw new Error(`Asset ${planned.plan_key} cannot be produced from status ${asset.status}.`);
+  }
 
-    const remainingCredits = await beginAssetGeneration(asset.id, planned.credits);
-    await emit({
-      campaignId,
-      agent: 'writing_agent',
-      node: 'produce',
-      level: 'tool',
-      message: `${planned.plan_key}: read ${sources.length} verbatim source excerpt${sources.length === 1 ? '' : 's'} and reserved ${planned.credits} credits.`,
-      data: {
-        asset_id: asset.id,
-        source_segment_ids: planned.segment_ids,
-        remaining_credits: remainingCredits,
-      },
-    });
+  const segmentById = new Map(segments.map((segment) => [segment.id, segment]));
+  const sources = sourceInputs(planned, segmentById);
+  const isRevision = asset.revision_count > 0 || asset.status === 'revising';
+  const previousReview = isRevision ? await getLatestReview(asset.id) : null;
+  const revisionFeedback = previousReview?.feedback ?? null;
+  const remainingCredits = isRevision
+    ? await beginAssetRevision(asset.id)
+    : await beginAssetGeneration(asset.id, planned.credits);
 
+  await emit({
+    campaignId,
+    agent: isWrittenType(planned.type) ? 'writing_agent' : 'clip_producer',
+    node: 'produce',
+    level: 'tool',
+    message: isRevision
+      ? `${planned.plan_key}: regenerating after Critic feedback and reserving 1 revision credit.`
+      : `${planned.plan_key}: generating the first attempt and reserving ${planned.credits} credits.`,
+    data: {
+      asset_id: asset.id,
+      source_segment_ids: planned.segment_ids,
+      revision_count: asset.revision_count,
+      revision_feedback: revisionFeedback,
+      remaining_credits: remainingCredits,
+    },
+  });
+
+  if (isWrittenType(planned.type)) {
     const output = await writeAsset({
       campaignId,
       planKey: planned.plan_key,
@@ -483,101 +508,323 @@ const produce: NodeFn = async (ctx): Promise<NodeResult> => {
       goal: campaign.goal,
       audience: campaign.audience,
       brandVoice: campaign.brand_voice,
+      revisionFeedback,
     });
     const saved = await saveWrittenAsset(asset.id, output);
-    produced++;
-
     await emit({
       campaignId,
       agent: 'writing_agent',
       node: 'produce',
       level: 'tool',
-      message: `${planned.plan_key}: saved ${labelForWrittenType(planned.type)} with ${output.grounding.length} verified source quote${output.grounding.length === 1 ? '' : 's'}.`,
+      message: `${planned.plan_key}: saved ${isRevision ? 'revised ' : ''}${labelForWrittenType(planned.type)} with ${output.grounding.length} verified source quote${output.grounding.length === 1 ? '' : 's'}.`,
       data: {
         asset_id: saved.id,
         plan_key: planned.plan_key,
         grounding_count: output.grounding.length,
+        revision_count: saved.revision_count,
         status: saved.status,
       },
     });
+
+    return {
+      next: 'critique',
+      reason: `${isRevision ? 'Regenerated' : 'Generated'} ${planned.plan_key}; the Critic will now judge the ${isRevision ? `revision ${asset.revision_count}` : 'first attempt'} in isolation.`,
+    };
   }
 
-  let videosProduced = 0;
-  let videosReused = 0;
-  for (const planned of plan.planned_assets) {
-    if (planned.type !== 'short_video') continue;
-    const asset = assetByKey.get(planned.plan_key);
-    if (!asset) throw new Error(`No asset row exists for ${planned.plan_key}.`);
-
-    if (asset.status === 'needs_review' && asset.media_url && asset.content) {
-      videosReused++;
-      continue;
-    }
-    if (asset.status !== 'planned' && asset.status !== 'generating') {
-      throw new Error(`Video asset ${planned.plan_key} cannot be produced from status ${asset.status}.`);
-    }
-    if (campaign.has_video_stream === null || campaign.source_duration_sec === null) {
-      throw new Error('Clip production reached without probed source media facts.');
-    }
-
-    const remainingCredits = await beginAssetGeneration(asset.id, planned.credits);
-    await emit({
-      campaignId,
-      agent: 'clip_producer',
-      node: 'produce',
-      level: 'tool',
-      message: `${planned.plan_key}: reserved ${planned.credits} credits and began the ${campaign.has_video_stream ? 'video' : 'audio-only caption-card'} media path.`,
-      data: {
-        asset_id: asset.id,
-        source_segment_ids: planned.segment_ids,
-        has_video_stream: campaign.has_video_stream,
-        remaining_credits: remainingCredits,
-      },
-    });
-
-    const output = await produceClip({
-      campaignId,
-      planKey: planned.plan_key,
-      segmentIds: planned.segment_ids,
-      topic: planned.topic,
-      purpose: planned.purpose,
-      maxVideoSeconds: campaign.max_video_seconds,
-      sourceDurationSec: Number(campaign.source_duration_sec),
-      hasVideoStream: campaign.has_video_stream,
-      goal: campaign.goal,
-      audience: campaign.audience,
-      brandVoice: campaign.brand_voice,
-    });
-    const saved = await saveVideoAsset(asset.id, output);
-    videosProduced++;
-
-    await emit({
-      campaignId,
-      agent: 'clip_producer',
-      node: 'produce',
-      level: 'tool',
-      message: `${planned.plan_key}: rendered and uploaded ${output.durationSec.toFixed(2)}s vertical MP4 after ${output.boundaryAdjustments} boundary adjustment${output.boundaryAdjustments === 1 ? '' : 's'}.`,
-      data: {
-        asset_id: saved.id,
-        clip_start: output.clipStart,
-        clip_end: output.clipEnd,
-        duration_sec: output.durationSec,
-        inspection: output.inspection,
-        media_url: output.mediaUrl,
-      },
-    });
+  if (campaign.has_video_stream === null || campaign.source_duration_sec === null) {
+    throw new Error('Clip production reached without probed source media facts.');
   }
 
-  const writtenSummary = `${produced} written asset${produced === 1 ? '' : 's'} generated${reused ? `, ${reused} reused` : ''}`;
-  const videoSummary = `${videosProduced} clip${videosProduced === 1 ? '' : 's'} rendered${videosReused ? `, ${videosReused} reused` : ''}`;
+  const output = await produceClip({
+    campaignId,
+    planKey: planned.plan_key,
+    segmentIds: planned.segment_ids,
+    topic: planned.topic,
+    purpose: planned.purpose,
+    maxVideoSeconds: campaign.max_video_seconds,
+    sourceDurationSec: Number(campaign.source_duration_sec),
+    hasVideoStream: campaign.has_video_stream,
+    goal: campaign.goal,
+    audience: campaign.audience,
+    brandVoice: campaign.brand_voice,
+    revisionFeedback,
+  });
+  const saved = await saveVideoAsset(asset.id, output);
+  await emit({
+    campaignId,
+    agent: 'clip_producer',
+    node: 'produce',
+    level: 'tool',
+    message: `${planned.plan_key}: rendered ${isRevision ? 'revised ' : ''}${output.durationSec.toFixed(2)}s vertical MP4 after ${output.boundaryAdjustments} boundary adjustment${output.boundaryAdjustments === 1 ? '' : 's'}.`,
+    data: {
+      asset_id: saved.id,
+      clip_start: output.clipStart,
+      clip_end: output.clipEnd,
+      duration_sec: output.durationSec,
+      inspection: output.inspection,
+      media_url: output.mediaUrl,
+      revision_count: saved.revision_count,
+    },
+  });
+
   return {
     next: 'critique',
-    reason: `Production complete: ${writtenSummary}; ${videoSummary}. Every clip boundary is word-aligned and every render was checked against its requested duration within 100 ms.`,
+    reason: `${isRevision ? 'Regenerated' : 'Generated'} ${planned.plan_key}; the Critic will now judge the ${isRevision ? `revision ${asset.revision_count}` : 'first attempt'} in isolation.`,
   };
 };
 
-/** The registry the executor walks. Later phases add their nodes here and to the
- * mermaid diagram in `MVP.md` section 6 in the same commit. */
+/** Critique the one durable output left by `produce` and route by code. */
+const critique: NodeFn = async (ctx): Promise<NodeResult> => {
+  const { campaign, campaignId } = ctx;
+  const assets = await getCampaignAssets(campaignId);
+  const asset = latestAssetWithStatus(assets, 'needs_review');
+
+  if (!asset) {
+    const strategy = await getLatestStrategy(campaignId);
+    if (!strategy) throw new Error('Critique reached without a saved strategy.');
+    const plan = planFromStrategy(strategy);
+    return {
+      next: planHasActiveAssets(plan.planned_assets, assets) ? 'produce' : 'campaign_review',
+      reason: planHasActiveAssets(plan.planned_assets, assets)
+        ? 'No unreviewed output is present; production will resume with the next planned asset.'
+        : 'All produced assets have a terminal Critic outcome. The portfolio is ready for Campaign Reviewer review.',
+    };
+  }
+  if (!asset.content) throw new Error(`Asset ${asset.plan_key} has no content for the Critic.`);
+
+  const segments = await getSegments(campaignId);
+  const segmentById = new Map(segments.map((segment) => [segment.id, segment]));
+  const sources = sourceInputsForIds(asset.source_segment_ids, segmentById, asset.plan_key);
+  const revisionIndex = asset.revision_count;
+
+  let review: CriticReview | null = null;
+  const savedReview = await getLatestReview(asset.id);
+  if (savedReview?.revision_index === revisionIndex) {
+    const parsed = CriticSchema.safeParse({
+      scores: savedReview.scores,
+      feedback: savedReview.feedback,
+    });
+    if (parsed.success) review = parsed.data;
+  }
+
+  if (!review) {
+    const priorRun = await getCriticRun(campaignId, asset.id, revisionIndex);
+    review =
+      priorRun?.review ??
+      (await critiqueAsset({
+        campaignId,
+        assetId: asset.id,
+        planKey: asset.plan_key,
+        type: asset.type as 'short_video' | 'x_thread' | 'linkedin_post',
+        platform: asset.platform as 'tiktok' | 'x' | 'linkedin',
+        hook: asset.hook,
+        content: asset.content,
+        sources,
+        inspection: inspectionFromContent(asset.content),
+        revisionIndex,
+        goal: campaign.goal,
+        audience: campaign.audience,
+        brandVoice: campaign.brand_voice,
+      }));
+  }
+
+  const routing = decideCritic(review.scores);
+  const persisted = await recordReview(asset.id, {
+    campaignId,
+    scores: review.scores,
+    feedback: review.feedback,
+    decision: routing.decision,
+    revisionIndex,
+  });
+
+  await emit({
+    campaignId,
+    agent: 'content_critic',
+    node: 'critique',
+    level: 'info',
+    message: `${asset.plan_key}: Critic ${routing.decision} at ${routing.average.toFixed(2)} average (lowest ${routing.lowest.toFixed(2)}).`,
+    data: {
+      asset_id: asset.id,
+      decision: routing.decision,
+      scores: review.scores,
+      average: routing.average,
+      lowest: routing.lowest,
+      revision_index: persisted.revision_index,
+    },
+  });
+
+  if (routing.decision === 'PASS') {
+    await markAssetPassed(asset.id);
+    return {
+      next: 'produce',
+      reason: `Critic PASS for ${asset.plan_key}: ${routing.average.toFixed(2)} average with no score below 5. Moving to the next asset.`,
+    };
+  }
+
+  if (routing.decision === 'REVISE') {
+    if (asset.revision_count < env.maxRevisionsPerAsset) {
+      const revised = await prepareAssetRevision(asset.id, asset.revision_count);
+      return {
+        next: 'produce',
+        reason: `Critic REVISE for ${asset.plan_key}: ${review.feedback} Revision ${revised.revision_count} of ${env.maxRevisionsPerAsset} is queued.`,
+      };
+    }
+
+    await emit({
+      campaignId,
+      agent: 'content_critic',
+      node: 'critique',
+      level: 'warn',
+      message: `${asset.plan_key}: revision limit reached at ${env.maxRevisionsPerAsset}; the asset will be abandoned.`,
+      data: { asset_id: asset.id, revision_count: asset.revision_count },
+    });
+    return {
+      next: 'abandon_asset',
+      reason: `Critic REVISE for ${asset.plan_key}, but all ${env.maxRevisionsPerAsset} revisions are already spent.`,
+    };
+  }
+
+  await markAssetRejected(asset.id);
+  return {
+    next: 'select_alternative',
+    reason: `Critic REJECT for ${asset.plan_key}: a score reached 3 or below. The rejected asset is preserved while the Strategist searches unused segments.`,
+  };
+};
+
+/** Strategist selects a new source moment without erasing the rejected history. */
+const selectAlternativeNode: NodeFn = async (ctx): Promise<NodeResult> => {
+  const { campaign, campaignId } = ctx;
+  const assets = await getCampaignAssets(campaignId);
+  const rejected = await latestAssetWithDecision(assets, 'rejected', 'REJECT');
+  if (!rejected) {
+    return {
+      next: 'produce',
+      reason: 'No rejected asset is awaiting an alternative; resuming production.',
+    };
+  }
+
+  const strategy = await getLatestStrategy(campaignId);
+  if (!strategy) throw new Error('Alternative selection reached without a saved strategy.');
+  const plan = planFromStrategy(strategy);
+  const existingAlternative = plan.planned_assets.find(
+    (asset) =>
+      asset.plan_key !== rejected.plan_key &&
+      asset.plan_key.startsWith(`${alternativeRoot(rejected.plan_key)}_alt_`),
+  );
+  if (existingAlternative) {
+    return {
+      next: 'produce',
+      reason: `${existingAlternative.plan_key} already replaces rejected ${rejected.plan_key}; resuming its production.`,
+    };
+  }
+
+  const original = plan.planned_assets.find((asset) => asset.plan_key === rejected.plan_key);
+  if (!original) {
+    throw new Error(`Rejected asset ${rejected.plan_key} is not present in strategy v${strategy.version}.`);
+  }
+  const review = await getLatestReview(rejected.id);
+  if (!review || review.decision !== 'REJECT') {
+    throw new Error(`Rejected asset ${rejected.plan_key} has no durable REJECT review.`);
+  }
+
+  const candidates = (await getUnusedSegments(campaignId)).filter(
+    (segment) =>
+      original.type !== 'short_video' ||
+      Number(segment.end_time) - Number(segment.start_time) <= campaign.max_video_seconds,
+  );
+  if (candidates.length === 0) {
+    await emit({
+      campaignId,
+      agent: 'content_strategist',
+      node: 'select_alternative',
+      level: 'warn',
+      message: `No unused segment can replace ${rejected.plan_key}; the asset will be abandoned.`,
+      data: { asset_id: rejected.id },
+    });
+    return {
+      next: 'abandon_asset',
+      reason: `No unused source segment is eligible for ${rejected.plan_key}; abandoning the rejected asset.`,
+    };
+  }
+
+  const priorSelection = await getAlternativeRun(campaignId, rejected.plan_key);
+  const selection =
+    priorSelection ??
+    (await selectAlternative({
+      campaignId,
+      planKey: rejected.plan_key,
+      rejectedTopic: original.topic,
+      rejectionFeedback: review.feedback,
+      assetType: original.type,
+      candidates,
+      goal: campaign.goal,
+      audience: campaign.audience,
+      brandVoice: campaign.brand_voice,
+    }));
+  const chosen = candidates.find((candidate) => candidate.id === selection.segment_id);
+  if (!chosen) throw new Error(`Alternative selection returned unknown segment ${selection.segment_id}.`);
+
+  const replacement: PlannedAsset = {
+    ...original,
+    plan_key: nextAlternativePlanKey(rejected.plan_key, assets),
+    topic: chosen.topic,
+    segment_ids: [chosen.id],
+    credits: CREDIT_COST[original.type],
+  };
+  await replacePlannedAsset(strategy, rejected.plan_key, replacement);
+  await emit({
+    campaignId,
+    agent: 'content_strategist',
+    node: 'select_alternative',
+    level: 'tool',
+    message: `Strategist replaced ${rejected.plan_key} with ${replacement.plan_key} from unused segment ${chosen.id}: ${selection.reasoning}`,
+    data: {
+      rejected_asset_id: rejected.id,
+      rejected_plan_key: rejected.plan_key,
+      replacement_plan_key: replacement.plan_key,
+      replacement_segment_id: chosen.id,
+    },
+  });
+
+  return {
+    next: 'produce',
+    reason: `Strategist found an unused alternative for ${rejected.plan_key}: ${replacement.plan_key} uses “${chosen.topic}”.`,
+  };
+};
+
+/** Exclude a weak asset after its revision or alternative path is exhausted. */
+const abandonAssetNode: NodeFn = async (ctx): Promise<NodeResult> => {
+  const { campaignId } = ctx;
+  const assets = await getCampaignAssets(campaignId);
+  const target =
+    (await latestAssetWithDecision(assets, 'needs_review', 'REVISE', env.maxRevisionsPerAsset)) ??
+    (await latestAssetWithDecision(assets, 'rejected', 'REJECT'));
+
+  if (!target) {
+    return {
+      next: 'produce',
+      reason: 'The current asset was already abandoned by an earlier attempt; checking for remaining production work.',
+    };
+  }
+
+  const abandoned = await abandonAsset(target.id);
+  await emit({
+    campaignId,
+    agent: 'system',
+    node: 'abandon_asset',
+    level: 'warn',
+    message: `Abandoned ${abandoned.plan_key}; rejected and abandoned assets are excluded from the final package.`,
+    data: { asset_id: abandoned.id, plan_key: abandoned.plan_key, status: abandoned.status },
+  });
+  return {
+    next: 'produce',
+    reason: `Abandoned ${abandoned.plan_key} after its Critic path could not produce a shippable asset.`,
+  };
+};
+
+/** The registry the executor walks. The Campaign Reviewer frontier remains
+ * intentionally absent until Phase 7; reaching it parks a truthful campaign. */
 export const NODES: Partial<Record<NodeId, NodeFn>> = {
   ingest,
   transcribe,
@@ -586,7 +833,88 @@ export const NODES: Partial<Record<NodeId, NodeFn>> = {
   director_review_plan: directorReviewPlan,
   await_strategy_approval: awaitStrategyApproval,
   produce,
+  critique,
+  select_alternative: selectAlternativeNode,
+  abandon_asset: abandonAssetNode,
 };
+
+const ACTIVE_ASSET_STATUSES = new Set(['planned', 'generating', 'revising', 'needs_review']);
+
+function hasGeneratedOutput(asset: AssetRow, type: PlannedAsset['type']): boolean {
+  return asset.content !== null && (type !== 'short_video' || asset.media_url !== null);
+}
+
+function sourceInputs(
+  planned: PlannedAsset,
+  segmentById: Map<string, SegmentRow>,
+): Array<{ id: string; startTime: number; endTime: number; transcript: string }> {
+  return sourceInputsForIds(planned.segment_ids, segmentById, planned.plan_key);
+}
+
+function sourceInputsForIds(
+  ids: string[],
+  segmentById: Map<string, SegmentRow>,
+  planKey: string,
+): Array<{ id: string; startTime: number; endTime: number; transcript: string }> {
+  return ids.map((id) => {
+    const segment = segmentById.get(id);
+    if (!segment) throw new Error(`Plan ${planKey} references missing segment ${id}.`);
+    return {
+      id: segment.id,
+      startTime: Number(segment.start_time),
+      endTime: Number(segment.end_time),
+      transcript: segment.transcript,
+    };
+  });
+}
+
+function planHasActiveAssets(planned: PlannedAsset[], assets: AssetRow[]): boolean {
+  const assetByKey = new Map(assets.map((asset) => [asset.plan_key, asset]));
+  return planned.some((candidate) => {
+    const asset = assetByKey.get(candidate.plan_key);
+    return asset ? ACTIVE_ASSET_STATUSES.has(asset.status) : true;
+  });
+}
+
+function latestAssetWithStatus(assets: AssetRow[], status: string): AssetRow | null {
+  return [...assets]
+    .filter((asset) => asset.status === status)
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0] ?? null;
+}
+
+async function latestAssetWithDecision(
+  assets: AssetRow[],
+  status: string,
+  decision: 'REVISE' | 'REJECT',
+  minimumRevisionCount?: number,
+): Promise<AssetRow | null> {
+  const candidates = [...assets]
+    .filter((asset) => asset.status === status)
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  for (const asset of candidates) {
+    if (minimumRevisionCount !== undefined && asset.revision_count < minimumRevisionCount) continue;
+    const review = await getLatestReview(asset.id);
+    if (review?.decision === decision) return asset;
+  }
+  return null;
+}
+
+function inspectionFromContent(content: Json): Json | null {
+  if (content === null || typeof content !== 'object' || Array.isArray(content)) return null;
+  const inspection = (content as Record<string, Json | undefined>).inspection;
+  return inspection ?? null;
+}
+
+function alternativeRoot(planKey: string): string {
+  return planKey.replace(/_alt_\d+$/, '');
+}
+
+function nextAlternativePlanKey(planKey: string, assets: AssetRow[]): string {
+  const root = alternativeRoot(planKey);
+  let index = 1;
+  while (assets.some((asset) => asset.plan_key === `${root}_alt_${index}`)) index++;
+  return `${root}_alt_${index}`;
+}
 
 function isWrittenType(type: string): type is WrittenAssetType {
   return type === 'x_thread' || type === 'linkedin_post';

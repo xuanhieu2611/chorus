@@ -2,7 +2,7 @@
 
 Companion to `PRD.md`. The PRD says *what* and *why*. This document says *what exactly gets built, with which tools, in which order*.
 
-**Status:** Phase 5 complete, Phase 6 next
+**Status:** Phase 6 complete, Phase 7 next
 **Last updated:** 2026-08-10
 
 ---
@@ -863,9 +863,11 @@ The full media pipeline. Draft cut, inspection, boundary adjustment, final 9:16 
 
 Homebrew's regular `ffmpeg` bottle omits libass, so Phase 5 corrected the prerequisite to keg-only `ffmpeg-full` and points `FFMPEG_PATH`/`FFPROBE_PATH` at its explicit paths. `lib/media/render.test.ts` renders synthetic video and MP3 fixtures through the real final commands. Both outputs are postable MP4s and both must match the requested span within 100 ms; the MP3 test also injects a throwing vision spy and proves it is never invoked.
 
-### Phase 6 - Critic and the revision loop
+### Phase 6 - Critic and the revision loop ✅
 Critic across both asset types. Threshold routing. Revision loop with a hard limit. `select_alternative` on `REJECT`. Asset abandonment.
 **Done:** you can watch a `REVISE` cause a regeneration that scores higher. This is the moment the project stops being a pipeline.
+
+**Built.** `lib/agents/critic.ts` scores each asset in isolation and returns actionable feedback; TypeScript maps those scores to PASS, REVISE, or REJECT. Production now handles one asset at a time, so a REVISE visibly returns to the producer with the Critic's feedback and a one-credit revision reservation. Three revision attempts are hard-capped in code, and a REJECT preserves the old row while the Strategist selects an unused segment for a suffixed replacement plan. Assets that exhaust either path are marked `abandoned` and remain excluded from the eventual package. Review rows and scorecards are visible on the dashboard, including the score progression across revisions.
 
 ### Phase 7 - Campaign Reviewer and replan
 Cross-asset review, forced replan under diversity 60, replacement asset generation, final approval gate.

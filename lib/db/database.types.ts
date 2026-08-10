@@ -510,6 +510,7 @@ export type Database = {
         Args: { p_asset_id: string; p_credits: number }
         Returns: number
       }
+      begin_asset_revision: { Args: { p_asset_id: string }; Returns: number }
       claim_campaign: {
         Args: { p_worker: string }
         Returns: {

@@ -32,8 +32,8 @@ export async function GET(
   if (!campaign) return Response.json({ error: 'Campaign not found.' }, { status: 404 });
 
   // These reads are independent. Start them together so the dashboard pays one
-  // database round-trip interval rather than four in series.
-  const [transcriptResult, segmentsResult, strategyResult, assetsResult, events] = await Promise.all([
+  // database round-trip interval rather than five in series.
+  const [transcriptResult, segmentsResult, strategyResult, assetsResult, reviewsResult, events] = await Promise.all([
     // The transcript itself is up to a megabyte of text and nothing on the
     // dashboard renders it, so the snapshot carries only proof that it exists.
     db()
@@ -63,11 +63,20 @@ export async function GET(
       )
       .eq('campaign_id', id)
       .order('created_at', { ascending: true }),
+    db()
+      .from('reviews')
+      .select('id, asset_id, campaign_id, reviewer_agent, scores, feedback, decision, revision_index, created_at')
+      .eq('campaign_id', id)
+      .order('created_at', { ascending: true }),
     readEventsSince(id, Number.isFinite(cursor) ? cursor : 0),
   ]);
 
   const secondaryError =
-    transcriptResult.error ?? segmentsResult.error ?? strategyResult.error ?? assetsResult.error;
+    transcriptResult.error ??
+    segmentsResult.error ??
+    strategyResult.error ??
+    assetsResult.error ??
+    reviewsResult.error;
   if (secondaryError) return Response.json({ error: secondaryError.message }, { status: 500 });
 
   const transcript = transcriptResult.data;
@@ -86,6 +95,7 @@ export async function GET(
     segments: segments ?? [],
     strategy: strategyResult.data,
     assets: assetsResult.data ?? [],
+    reviews: reviewsResult.data ?? [],
     events,
     cursor: events.length > 0 ? events[events.length - 1].id : cursor,
   });
