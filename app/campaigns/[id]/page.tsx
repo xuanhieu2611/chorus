@@ -3,7 +3,7 @@ import { CampaignMonitor } from '@/components/CampaignMonitor';
 
 /**
  * The live dashboard. It shows source facts, analysis, strategy approval,
- * grounded written assets, and the event timeline. The live graph lands in
+ * grounded writing, playable rendered clips, and the event timeline. The live graph lands in
  * Phase 8 after every production and review node exists.
  */
 export default async function CampaignPage({ params }: PageProps<'/campaigns/[id]'>) {

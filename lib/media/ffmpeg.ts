@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { mkdir, readdir, rm } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { env } from '@/lib/env';
 
@@ -155,4 +155,178 @@ export async function sliceAudio(
     'copy',
     destPath,
   ]);
+}
+
+export interface SilenceRange {
+  start: number;
+  end: number;
+}
+
+/** Fast inspection cut. Video is encoded ultrafast; audio-only inputs stay audio. */
+export async function cutDraft(
+  sourcePath: string,
+  destPath: string,
+  startSec: number,
+  endSec: number,
+  hasVideoStream: boolean,
+): Promise<void> {
+  assertRange(startSec, endSec);
+  await mkdir(dirname(destPath), { recursive: true });
+  const common = [
+    '-y',
+    '-ss',
+    startSec.toFixed(3),
+    '-i',
+    sourcePath,
+    '-t',
+    (endSec - startSec).toFixed(3),
+  ];
+  await run(
+    env.ffmpegPath,
+    hasVideoStream
+      ? [...common, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-c:a', 'aac', destPath]
+      : [...common, '-vn', '-c:a', 'aac', '-b:a', '128k', destPath],
+  );
+}
+
+/** Silence timestamps are relative to the draft, exactly as the inspector needs. */
+export async function detectSilences(path: string): Promise<SilenceRange[]> {
+  const { stderr } = await run(env.ffmpegPath, [
+    '-i',
+    path,
+    '-af',
+    'silencedetect=noise=-30dB:d=0.6',
+    '-f',
+    'null',
+    '-',
+  ]);
+  return parseSilenceDetect(stderr);
+}
+
+export function parseSilenceDetect(stderr: string): SilenceRange[] {
+  const ranges: SilenceRange[] = [];
+  let pendingStart: number | null = null;
+  for (const line of stderr.split('\n')) {
+    const start = /silence_start:\s*([0-9.]+)/.exec(line);
+    if (start) pendingStart = Number(start[1]);
+    const end = /silence_end:\s*([0-9.]+)/.exec(line);
+    if (end) {
+      const endSec = Number(end[1]);
+      if (pendingStart !== null && Number.isFinite(endSec)) {
+        ranges.push({ start: pendingStart, end: endSec });
+      }
+      pendingStart = null;
+    }
+  }
+  return ranges;
+}
+
+/** Six small JPEGs are enough to catch black frames and broken center crops. */
+export async function sampleFrames(
+  path: string,
+  outputDir: string,
+  durationSec: number,
+  count = 6,
+): Promise<string[]> {
+  if (durationSec <= 0 || count <= 0) return [];
+  await mkdir(outputDir, { recursive: true });
+  for (const file of await readdir(outputDir)) {
+    if (/^frame-\d+\.jpg$/.test(file)) await rm(join(outputDir, file));
+  }
+
+  await run(env.ffmpegPath, [
+    '-y',
+    '-i',
+    path,
+    '-vf',
+    `fps=${count}/${durationSec.toFixed(3)},scale=512:-2`,
+    '-frames:v',
+    String(count),
+    join(outputDir, 'frame-%02d.jpg'),
+  ]);
+
+  return (await readdir(outputDir))
+    .filter((file) => /^frame-\d+\.jpg$/.test(file))
+    .sort()
+    .map((file) => join(outputDir, file));
+}
+
+export interface VerticalRenderInput {
+  sourcePath: string;
+  destPath: string;
+  assPath: string;
+  startSec: number;
+  endSec: number;
+  hasVideoStream: boolean;
+}
+
+/** Accurate final render. The duration is owned by -t, not keyframe placement. */
+export async function renderVertical(input: VerticalRenderInput): Promise<void> {
+  assertRange(input.startSec, input.endSec);
+  await mkdir(dirname(input.destPath), { recursive: true });
+  const duration = (input.endSec - input.startSec).toFixed(3);
+  const ass = escapeFilterPath(input.assPath);
+
+  const args = input.hasVideoStream
+    ? [
+        '-y',
+        '-ss',
+        input.startSec.toFixed(3),
+        '-i',
+        input.sourcePath,
+        '-t',
+        duration,
+        '-vf',
+        `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,ass=filename='${ass}'`,
+      ]
+    : [
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        `color=c=0x0B0B0F:s=1080x1920:r=30:d=${duration}`,
+        '-ss',
+        input.startSec.toFixed(3),
+        '-i',
+        input.sourcePath,
+        '-t',
+        duration,
+        '-vf',
+        `ass=filename='${ass}'`,
+        '-map',
+        '0:v:0',
+        '-map',
+        '1:a:0',
+        '-shortest',
+      ];
+
+  await run(env.ffmpegPath, [
+    ...args,
+    '-c:v',
+    'libx264',
+    '-preset',
+    'medium',
+    '-crf',
+    '20',
+    '-pix_fmt',
+    'yuv420p',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '128k',
+    '-movflags',
+    '+faststart',
+    input.destPath,
+  ]);
+}
+
+function assertRange(startSec: number, endSec: number): void {
+  if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec <= startSec) {
+    throw new Error(`Invalid media range ${startSec}-${endSec}.`);
+  }
+}
+
+/** ffmpeg's filter parser treats backslashes, colons, quotes, and commas specially. */
+function escapeFilterPath(path: string): string {
+  return path.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'").replace(/,/g, '\\,');
 }

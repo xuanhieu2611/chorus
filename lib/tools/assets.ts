@@ -2,6 +2,7 @@ import { db, type AssetRow } from '@/lib/db/client';
 import type { Json } from '@/lib/db/database.types';
 import type { PlannedAsset } from '@/lib/agents/strategist';
 import type { WrittenAsset } from '@/lib/agents/writer';
+import type { ProducedClip } from '@/lib/agents/clip-producer';
 
 export type AssetStatus =
   | 'planned'
@@ -85,6 +86,41 @@ export async function beginAssetGeneration(assetId: string, credits: number): Pr
   });
   if (error) throw new Error(`Could not begin asset generation: ${error.message}`);
   if (data === null) throw new Error('Credit reservation returned no balance.');
+  return data;
+}
+
+export async function saveVideoAsset(assetId: string, output: ProducedClip): Promise<AssetRow> {
+  const content = {
+    kind: 'short_video',
+    hook: output.hook,
+    caption: output.caption,
+    clip_start: output.clipStart,
+    clip_end: output.clipEnd,
+    reasoning: output.reasoning,
+    inspection: output.inspection,
+    boundary_adjustments: output.boundaryAdjustments,
+  } as Json;
+
+  const { data, error } = await db()
+    .from('assets')
+    .update({
+      hook: output.hook,
+      content,
+      media_url: output.mediaUrl,
+      media_path: output.mediaPath,
+      duration_sec: output.durationSec,
+      status: 'needs_review',
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', assetId)
+    .eq('status', 'generating')
+    .select()
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to save video asset: ${error.message}`);
+  if (!data) {
+    throw new Error(`Asset ${assetId} was not generating, so its rendered media was not overwritten.`);
+  }
   return data;
 }
 

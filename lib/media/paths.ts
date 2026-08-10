@@ -51,6 +51,12 @@ export function campaignAudioPath(campaignId: string): string {
   return join(campaignWorkDir(campaignId), 'audio.mp3');
 }
 
+/** One stable scratch directory per asset makes media generation resumable. */
+export function assetWorkDir(campaignId: string, planKey: string): string {
+  const safeKey = planKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return join(campaignWorkDir(campaignId), 'assets', safeKey);
+}
+
 /** `campaigns.source_path` is stored relative to `STORAGE_DIR` so the row stays
  * valid if the directory moves. */
 export function resolveSourcePath(sourcePath: string): string {

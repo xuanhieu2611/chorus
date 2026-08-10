@@ -37,6 +37,8 @@ export interface StructuredCall<T> {
   prompt: string;
   /** Recorded verbatim to `agent_runs.input`, so a run can be replayed by hand. */
   input?: Json;
+  /** Optional image inputs for multimodal judgement. Raw bytes are never written to agent_runs. */
+  images?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>;
   /** Repair attempts after the first failure. One is usually enough; then fail the node. */
   maxRepairAttempts?: number;
   onAttempt?: (info: AttemptInfo) => void;
@@ -85,7 +87,24 @@ export async function callStructured<T>(call: StructuredCall<T>): Promise<Struct
       const result = await generateText({
         model: modelFor(call.role),
         system: call.system,
-        prompt,
+        ...(call.images?.length
+          ? {
+              messages: [
+                {
+                  role: 'user' as const,
+                  content: [
+                    { type: 'text' as const, text: prompt },
+                    ...call.images.map((image) => ({
+                      type: 'file' as const,
+                      data: image.data,
+                      mediaType: image.mediaType,
+                      filename: image.filename,
+                    })),
+                  ],
+                },
+              ],
+            }
+          : { prompt }),
         output: Output.object({
           schema: call.schema,
           name: call.schemaName,

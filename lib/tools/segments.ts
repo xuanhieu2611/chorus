@@ -1,5 +1,7 @@
 import { db, type SegmentRow } from '@/lib/db/client';
 import type { AnalyzedSegment, ContentType } from '@/lib/agents/source-analyst';
+import { getTranscript } from '@/lib/tools/transcript';
+import type { Word } from '@/lib/media/transcribe';
 
 /**
  * Segment access. Part of the tool layer, which is the only path an agent takes
@@ -33,6 +35,37 @@ export async function getSegments(
   const { data, error } = await query;
   if (error) throw new Error(`Failed to read segments: ${error.message}`);
   return data ?? [];
+}
+
+export interface ReadSegmentResult {
+  id: string;
+  transcript: string;
+  words: Word[];
+  start: number;
+  end: number;
+  topic: string;
+}
+
+/** Verbatim segment text plus source-timeline words for clip boundaries. */
+export async function readSegment(segmentId: string): Promise<ReadSegmentResult> {
+  const { data: segment, error } = await db()
+    .from('segments')
+    .select('*')
+    .eq('id', segmentId)
+    .single();
+  if (error) throw new Error(`Failed to read segment ${segmentId}: ${error.message}`);
+
+  const start = Number(segment.start_time);
+  const end = Number(segment.end_time);
+  const transcript = await getTranscript(segment.campaign_id);
+  return {
+    id: segment.id,
+    transcript: segment.transcript,
+    words: transcript.words.filter((word) => word.e > start && word.s < end),
+    start,
+    end,
+    topic: segment.topic,
+  };
 }
 
 export async function countSegments(campaignId: string): Promise<number> {

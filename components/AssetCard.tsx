@@ -76,6 +76,32 @@ export function AssetCard({
           </div>
         )}
 
+        {asset.type === 'short_video' && asset.media_url && (
+          <div className="overflow-hidden rounded-xl border bg-black">
+            <video
+              controls
+              preload="metadata"
+              playsInline
+              src={asset.media_url}
+              className="aspect-[9/16] max-h-[640px] w-full bg-black object-contain"
+            >
+              Your browser does not support MP4 playback.
+            </video>
+          </div>
+        )}
+
+        {content?.kind === 'short_video' && (
+          <div className="bg-muted/40 flex flex-col gap-2 rounded-lg border p-3 text-sm">
+            <p>{content.caption}</p>
+            <p className="text-muted-foreground font-mono text-[11px]">
+              Clip {clock(content.clip_start)}-{clock(content.clip_end)} ·{' '}
+              {(content.clip_end - content.clip_start).toFixed(1)}s ·{' '}
+              {content.boundary_adjustments} boundary adjustment
+              {content.boundary_adjustments === 1 ? '' : 's'}
+            </p>
+          </div>
+        )}
+
         {content?.kind === 'x_thread' && (
           <ol className="flex flex-col gap-2">
             {content.tweets.map((tweet, index) => (
@@ -97,9 +123,7 @@ export function AssetCard({
 
         {!content && (
           <p className="text-muted-foreground text-sm">
-            {asset.type === 'short_video'
-              ? 'Waiting for the Clip Producer in Phase 5.'
-              : 'Waiting for the Writing Agent.'}
+            {asset.type === 'short_video' ? 'Waiting for the Clip Producer.' : 'Waiting for the Writing Agent.'}
           </p>
         )}
 
@@ -128,13 +152,37 @@ export function AssetCard({
 
 type ParsedContent =
   | { kind: 'linkedin_post'; body: string; grounding: GroundingView[] }
-  | { kind: 'x_thread'; tweets: string[]; grounding: GroundingView[] };
+  | { kind: 'x_thread'; tweets: string[]; grounding: GroundingView[] }
+  | {
+      kind: 'short_video';
+      caption: string;
+      clip_start: number;
+      clip_end: number;
+      boundary_adjustments: number;
+      grounding: GroundingView[];
+    };
 
 function parseContent(value: unknown): ParsedContent | null {
   if (!isRecord(value)) return null;
   const grounding = parseGrounding(value.grounding);
   if (value.kind === 'linkedin_post' && typeof value.body === 'string') {
     return { kind: 'linkedin_post', body: value.body, grounding };
+  }
+  if (
+    value.kind === 'short_video' &&
+    typeof value.caption === 'string' &&
+    typeof value.clip_start === 'number' &&
+    typeof value.clip_end === 'number'
+  ) {
+    return {
+      kind: 'short_video',
+      caption: value.caption,
+      clip_start: value.clip_start,
+      clip_end: value.clip_end,
+      boundary_adjustments:
+        typeof value.boundary_adjustments === 'number' ? value.boundary_adjustments : 0,
+      grounding,
+    };
   }
   if (
     value.kind === 'x_thread' &&

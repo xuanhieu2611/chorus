@@ -2,7 +2,7 @@
 
 Mirrors `MVP.md` section 6. **Changing `lib/graph/nodes.ts` means updating this diagram in the same commit**, and `components/AgentGraph.tsx` renders the same node set live.
 
-**Build state:** Phase 4 complete. The executor runs through the first human gate and produces grounded X threads and LinkedIn posts. A text-only plan parks at the unbuilt `critique` node. A mixed plan stays parked at `produce` after its writing is ready so Phase 5 can resume the same campaign with the Clip Producer.
+**Build state:** Phase 5 complete. The executor runs through the first human gate and produces grounded writing plus rendered short videos. Both video and audio-only sources finish as 9:16 MP4s with burned word captions, then the campaign parks at the unbuilt `critique` node for Phase 6.
 
 ---
 
@@ -81,6 +81,18 @@ node ──> agent ──> lib/tools/ ──> database / ffmpeg / storage
 
 Agents call `lib/tools/` and nothing else. No agent file imports the Supabase client, and no agent file calls the AI SDK directly. Both rules exist so that every action an agent takes is logged to `agent_runs.tool_calls` and `agent_events` without anyone remembering to log it, which is what fills the live UI.
 
+## Phase 5 decisions
+
+**A boundary is a word fact, not a model fact.** The model proposes an absolute source span, but `snapClipBoundaries` constrains it to one selected segment, starts on a real word, ends 300 ms after the final included word, and enforces the campaign duration cap. The same function handles vision suggestions. A model cannot make ffmpeg seek outside the selected evidence or cut a word in half. The producer inspects the initial draft and permits at most two changed drafts; a repeated suggestion ends the loop rather than spending a third adjustment on identical media.
+
+**Inspection branches on the probed database fact.** Video drafts run `silencedetect`, sample six chronological 512 px JPEGs, and send those frames plus opening word timings to `MODEL_VISION`. Audio drafts run silence and word-timing checks in code. `inspectClip` does not merely ask the model to ignore frames on audio: it never invokes the injected vision function, which the MP3 render test proves with a throwing spy. This is inspection, not video understanding, and events name the actual signals used.
+
+**The final command is a correctness boundary.** Both render branches seek the source and set `-t` from the snapped span. Video scales and center-crops to 1080x1920; audio maps a generated 1080x1920 background to the source audio. Both burn one ASS file containing the three-second hook and word-highlight captions, encode H.264/AAC with faststart, then probe the result. Production refuses to save or upload a render whose measured duration differs from the requested span by more than 100 ms. The automated test exercises the real ffmpeg commands for synthetic video and MP3 fixtures.
+
+**Caption burning requires libass.** Homebrew's regular `ffmpeg` 8.1.2 bottle does not include the `ass` filter even though the original prerequisite assumed it did. Phase 5 uses keg-only `ffmpeg-full`, and `.env.example` points to `/opt/homebrew/opt/ffmpeg-full/bin`. This was found by running the render test, not by inspecting a nominal version string.
+
+**Only rendered clips leave local disk.** Drafts, frames, captions, and final scratch files live under `work/{campaignId}/assets/{planKey}`. The final MP4 is uploaded idempotently to the public Supabase `assets` bucket and its URL plus local relative path are saved atomically with the asset's `needs_review` transition. Source media remains local and never approaches Supabase's 50 MB object limit.
+
 ## Phase 4 decisions
 
 **Grounding is a runtime property.** The Writing Agent sees verbatim transcript excerpts, not segment summaries. It also receives overlapping 24-word quote options generated deterministically from those excerpts, which gives weaker development models short spans they can copy without changing transcription grammar. Its output maps every factual claim to a `source_quote`, and TypeScript accepts a quote only when it occurs in one of the selected excerpts after normalizing case and whitespace. A semantic grounding failure gets one full regeneration with the exact bad claims and quotes named. A second failure stops the node, so an ungrounded asset never reaches `needs_review` or the UI as plausible finished work.
@@ -89,7 +101,7 @@ Agents call `lib/tools/` and nothing else. No agent file imports the Supabase cl
 
 **Credits and generation status move atomically.** `begin_asset_generation` locks both rows, checks the fixed cost and campaign budget, increments `credits_spent`, and changes the asset from `planned` to `generating` in one transaction. Calling it again while the asset is already `generating` is free. A worker can die anywhere after that point without charging the planning credits twice when production resumes.
 
-**Phase 4 sweeps written assets temporarily.** The final graph alternates `produce` and `critique` one asset at a time, but the Critic does not exist until Phase 6. Phase 4 produces every planned text asset so the promised X and LinkedIn outputs can both be inspected. If the plan also contains videos, the node returns terminally with `current_node = produce` and `status = complete`; this is the same honest frontier pattern used by the executor and lets Phase 5 resume in place. With no videos left, it advances to the unbuilt `critique` frontier. Phase 6 removes the sweep in favor of the diagram's final loop.
+**Production sweeps assets temporarily.** The final graph alternates `produce` and `critique` one asset at a time, but the Critic does not exist until Phase 6. Phase 4 initially swept written assets; Phase 5 extends the sweep across clips, reusing any durable `needs_review` output after a crash. Once every planned output exists, production advances to the honest unbuilt `critique` frontier. Phase 6 removes the sweep in favor of the diagram's final loop.
 
 ## Phase 3 decisions
 

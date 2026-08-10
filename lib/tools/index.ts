@@ -8,14 +8,16 @@
  * somebody remembering to log it.
  *
  * Phase 1 exposed the transcript, Phase 2 added segments, Phase 3 added the
- * versioned strategy, and Phase 4 adds durable assets with atomic credit
- * reservation. Video tools land with the Clip Producer in Phase 5.
+ * versioned strategy, Phase 4 added durable assets with atomic credit
+ * reservation, and Phase 5 added draft inspection, subtitle, render, and upload tools.
  */
 export { getTranscript, hasTranscript, saveTranscript, type Transcript } from '@/lib/tools/transcript';
 export {
   countSegments,
   getSegments,
+  readSegment,
   saveSegments,
+  type ReadSegmentResult,
   type SegmentFilter,
 } from '@/lib/tools/segments';
 export {
@@ -31,6 +33,17 @@ export {
   beginAssetGeneration,
   ensurePlannedAssets,
   getCampaignAssets,
+  saveVideoAsset,
   saveWrittenAsset,
   type AssetStatus,
 } from '@/lib/tools/assets';
+export {
+  extractVideo,
+  generateSubtitles,
+  getCampaignMedia,
+  inspectRenderedVideo,
+  loadFrameImages,
+  localMediaPath,
+  renderVerticalVideo,
+  uploadAsset,
+} from '@/lib/tools/video';

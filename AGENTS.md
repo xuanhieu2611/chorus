@@ -8,7 +8,7 @@ The product thesis is that the system exercises judgment rather than running a p
 
 ## Current state
 
-**Phase 4 complete. Phase 5 is next.** Scaffold, schema, LLM wrapper, worker claim loop, the graph executor, `ingest`, `transcribe`, `analyze`, `strategize`, `director_review_plan`, the first human gate, and grounded written-asset production exist. Approve a strategy in the dashboard and the Writing Agent produces real X threads and LinkedIn posts with every grounding quote verified against verbatim selected transcript excerpts. A mixed plan stays parked at `produce` for the Phase 5 Clip Producer; a text-only plan parks at the unbuilt `critique` frontier (see `docs/ARCHITECTURE.md`).
+**Phase 5 complete. Phase 6 is next.** Scaffold, schema, LLM wrapper, worker claim loop, the graph executor, `ingest`, `transcribe`, `analyze`, `strategize`, `director_review_plan`, the first human gate, grounded written-asset production, and the full Clip Producer media loop exist. Approve a strategy in the dashboard and production creates grounded X threads and LinkedIn posts plus 9:16 MP4 clips with word captions. Video sources get silence plus sampled-frame inspection; audio-only sources deterministically render caption cards without a vision call. Campaigns now park at the unbuilt `critique` frontier (see `docs/ARCHITECTURE.md`).
 
 `MVP.md` is the working document. Read it before touching anything: it fixes the stack with verified versions, the Postgres schema, the agent graph, per-agent contracts and Zod schemas, the FFmpeg pipeline, guardrails, and a 10-phase build plan where each phase ends in something runnable. Build in phase order and do not start a phase before the previous one visibly works.
 

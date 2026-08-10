@@ -2,6 +2,7 @@ import { mkdir, stat } from 'node:fs/promises';
 import { reviewStrategy } from '@/lib/agents/director';
 import { analyzeSource } from '@/lib/agents/source-analyst';
 import { createStrategy } from '@/lib/agents/strategist';
+import { produceClip } from '@/lib/agents/clip-producer';
 import { writeAsset, type WrittenAssetType } from '@/lib/agents/writer';
 import { emit } from '@/lib/events';
 import { env } from '@/lib/env';
@@ -28,6 +29,7 @@ import {
   saveSegments,
   saveStrategy,
   saveTranscript,
+  saveVideoAsset,
   saveWrittenAsset,
 } from '@/lib/tools';
 import type { NodeFn, NodeId, NodeResult } from '@/lib/graph/types';
@@ -37,8 +39,9 @@ import type { NodeFn, NodeId, NodeResult } from '@/lib/graph/types';
  * `lib/graph/run.ts` only walks the edges these functions return.
  *
  * Built so far: `ingest` and `transcribe` (Phase 1), `analyze` (Phase 2),
- * `strategize`, `director_review_plan`, and the first gate (Phase 3), plus the
- * Writing Agent branch of `produce` (Phase 4). Nodes for later phases are absent
+ * `strategize`, `director_review_plan`, and the first gate (Phase 3), the
+ * Writing Agent branch of `produce` (Phase 4), and the Clip Producer (Phase 5).
+ * Nodes for later phases are absent
  * from the registry rather than stubbed, and
  * `run.ts` stops cleanly when it reaches one. A plausible empty stub is worse
  * than a missing entry because it makes an unbuilt phase look complete.
@@ -406,13 +409,11 @@ const awaitStrategyApproval: NodeFn = async (): Promise<NodeResult> => ({
 });
 
 /**
- * Materialize the approved plan and produce its written assets from verbatim
- * source excerpts. Phase 4 sweeps the text portion of the plan so an X thread
- * and LinkedIn post can both be inspected before the Critic exists. Phase 6
- * narrows this to the graph's final one-asset-at-a-time produce/critique loop.
- *
- * A mixed plan parks on `produce` after its text is ready. Keeping the precise
- * node there means Phase 5 can resume the same campaign to render its clips.
+ * Materialize the approved plan and produce every asset while the Critic is not
+ * built yet. Writing uses verbatim excerpts. Video runs the full draft,
+ * inspect, word-boundary adjustment, vertical render, caption burn, and upload
+ * path. Phase 6 narrows this temporary sweep to the graph's final one-asset-at-a-time
+ * produce/critique loop.
  */
 const produce: NodeFn = async (ctx): Promise<NodeResult> => {
   const { campaign, campaignId } = ctx;
@@ -501,27 +502,77 @@ const produce: NodeFn = async (ctx): Promise<NodeResult> => {
     });
   }
 
-  const videoCount = plan.planned_assets.filter((asset) => asset.type === 'short_video').length;
-  const summary = `${produced} written asset${produced === 1 ? '' : 's'} generated${reused ? `, ${reused} reused from an earlier run` : ''}`;
+  let videosProduced = 0;
+  let videosReused = 0;
+  for (const planned of plan.planned_assets) {
+    if (planned.type !== 'short_video') continue;
+    const asset = assetByKey.get(planned.plan_key);
+    if (!asset) throw new Error(`No asset row exists for ${planned.plan_key}.`);
 
-  if (videoCount > 0) {
+    if (asset.status === 'needs_review' && asset.media_url && asset.content) {
+      videosReused++;
+      continue;
+    }
+    if (asset.status !== 'planned' && asset.status !== 'generating') {
+      throw new Error(`Video asset ${planned.plan_key} cannot be produced from status ${asset.status}.`);
+    }
+    if (campaign.has_video_stream === null || campaign.source_duration_sec === null) {
+      throw new Error('Clip production reached without probed source media facts.');
+    }
+
+    const remainingCredits = await beginAssetGeneration(asset.id, planned.credits);
     await emit({
       campaignId,
-      agent: 'system',
+      agent: 'clip_producer',
       node: 'produce',
-      level: 'warn',
-      message: `${videoCount} planned video asset${videoCount === 1 ? '' : 's'} remain for the Phase 5 Clip Producer. The campaign stays parked at produce so it can resume in place.`,
+      level: 'tool',
+      message: `${planned.plan_key}: reserved ${planned.credits} credits and began the ${campaign.has_video_stream ? 'video' : 'audio-only caption-card'} media path.`,
+      data: {
+        asset_id: asset.id,
+        source_segment_ids: planned.segment_ids,
+        has_video_stream: campaign.has_video_stream,
+        remaining_credits: remainingCredits,
+      },
     });
-    return {
-      next: null,
-      patch: { status: 'complete' },
-      reason: `Writing production complete: ${summary}. Video production is the next unbuilt frontier.`,
-    };
+
+    const output = await produceClip({
+      campaignId,
+      planKey: planned.plan_key,
+      segmentIds: planned.segment_ids,
+      topic: planned.topic,
+      purpose: planned.purpose,
+      maxVideoSeconds: campaign.max_video_seconds,
+      sourceDurationSec: Number(campaign.source_duration_sec),
+      hasVideoStream: campaign.has_video_stream,
+      goal: campaign.goal,
+      audience: campaign.audience,
+      brandVoice: campaign.brand_voice,
+    });
+    const saved = await saveVideoAsset(asset.id, output);
+    videosProduced++;
+
+    await emit({
+      campaignId,
+      agent: 'clip_producer',
+      node: 'produce',
+      level: 'tool',
+      message: `${planned.plan_key}: rendered and uploaded ${output.durationSec.toFixed(2)}s vertical MP4 after ${output.boundaryAdjustments} boundary adjustment${output.boundaryAdjustments === 1 ? '' : 's'}.`,
+      data: {
+        asset_id: saved.id,
+        clip_start: output.clipStart,
+        clip_end: output.clipEnd,
+        duration_sec: output.durationSec,
+        inspection: output.inspection,
+        media_url: output.mediaUrl,
+      },
+    });
   }
 
+  const writtenSummary = `${produced} written asset${produced === 1 ? '' : 's'} generated${reused ? `, ${reused} reused` : ''}`;
+  const videoSummary = `${videosProduced} clip${videosProduced === 1 ? '' : 's'} rendered${videosReused ? `, ${videosReused} reused` : ''}`;
   return {
     next: 'critique',
-    reason: `Writing production complete: ${summary}. Every grounding quote was verified against the selected transcript before saving.`,
+    reason: `Production complete: ${writtenSummary}; ${videoSummary}. Every clip boundary is word-aligned and every render was checked against its requested duration within 100 ms.`,
   };
 };
 

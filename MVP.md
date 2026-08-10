@@ -2,8 +2,8 @@
 
 Companion to `PRD.md`. The PRD says *what* and *why*. This document says *what exactly gets built, with which tools, in which order*.
 
-**Status:** Phase 4 complete, Phase 5 next
-**Last updated:** 2026-08-09
+**Status:** Phase 5 complete, Phase 6 next
+**Last updated:** 2026-08-10
 
 ---
 
@@ -52,7 +52,8 @@ Plus the two non-negotiable correctness properties from PRD section 27:
 ## 2. Prerequisites and pinned stack
 
 ```bash
-ffmpeg -version    # 8.1.2   installed 2026-08-09 via Homebrew
+brew install ffmpeg-full
+/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg -version  # 8.1.2, includes libass
 node -v            # v24.14.0  (Next.js 16 requires >= 20.9.0)
 npm -v             # 11.9.0
 ```
@@ -117,8 +118,9 @@ SUPABASE_SERVICE_ROLE_KEY=    # server + worker only, never shipped to the brows
 
 # --- Local media ---
 STORAGE_DIR=./storage         # source uploads and render scratch space
-FFMPEG_PATH=/opt/homebrew/bin/ffmpeg
-FFPROBE_PATH=/opt/homebrew/bin/ffprobe
+# `brew install ffmpeg-full`: regular Homebrew ffmpeg omits the libass caption filter.
+FFMPEG_PATH=/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg
+FFPROBE_PATH=/opt/homebrew/opt/ffmpeg-full/bin/ffprobe
 
 # --- Guardrails ---
 MAX_REVISIONS_PER_ASSET=3
@@ -853,9 +855,13 @@ Credit reservation and the `planned` to `generating` transition happen in one Po
 
 Until the Critic lands in Phase 6, `produce` sweeps all written assets so both platform outputs are inspectable. A mixed plan then parks on `produce`, not `critique`, leaving the same campaign resumable for Phase 5's Clip Producer. This temporary branch disappears when video production exists; Phase 6 then narrows production to the final one-asset-at-a-time loop shown in section 6.
 
-### Phase 5 - Clip Producer
+### Phase 5 - Clip Producer ✅
 The full media pipeline. Draft cut, inspection, boundary adjustment, final 9:16 render with burned captions, upload to Supabase Storage. Build the video path first, then add the `has_video_stream` branch from section 9.1.
 **Done:** a vertical MP4 with captions plays in the browser. Automated test asserts rendered duration matches the requested boundaries within 100 ms. **Run the same test with an MP3 source** and confirm it renders a caption card without making a single vision call.
+
+**Built.** `lib/agents/clip-producer.ts`, the video tool layer, ASS subtitle generation, both final-render branches, the public `assets` Storage bucket, and inline dashboard playback. The producer chooses one contiguous span, snaps every proposed or adjusted edge onto real word timestamps, leaves 300 ms after the final word, and permits at most two draft adjustments. Video inspection combines `silencedetect`, six chronological 512 px frames, and the opening word timings through `MODEL_VISION`. Audio inspection is deterministic and cannot call the vision function.
+
+Homebrew's regular `ffmpeg` bottle omits libass, so Phase 5 corrected the prerequisite to keg-only `ffmpeg-full` and points `FFMPEG_PATH`/`FFPROBE_PATH` at its explicit paths. `lib/media/render.test.ts` renders synthetic video and MP3 fixtures through the real final commands. Both outputs are postable MP4s and both must match the requested span within 100 ms; the MP3 test also injects a throwing vision spy and proves it is never invoked.
 
 ### Phase 6 - Critic and the revision loop
 Critic across both asset types. Threshold routing. Revision loop with a hard limit. `select_alternative` on `REJECT`. Asset abandonment.
