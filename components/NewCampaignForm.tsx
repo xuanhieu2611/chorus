@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -25,11 +25,21 @@ type Phase = 'idle' | 'uploading' | 'creating';
 export function NewCampaignForm({ maxAssets }: { maxAssets: number }) {
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
+  // A client event handler is the only safe way to stream a multi-GB upload
+  // with progress. Keep the submit control inert until React has attached that
+  // handler, otherwise a click during hydration falls back to a native GET and
+  // puts every form field in the URL.
+  const [hydrated, setHydrated] = useState(false);
   const [phase, setPhase] = useState<Phase>('idle');
   const [percent, setPercent] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const busy = phase !== 'idle';
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setHydrated(true), 100);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -200,8 +210,14 @@ export function NewCampaignForm({ maxAssets }: { maxAssets: number }) {
         </div>
       )}
 
-      <Button type="submit" disabled={busy} size="lg">
-        {phase === 'uploading' ? 'Uploading…' : phase === 'creating' ? 'Queueing…' : 'Build Campaign'}
+      <Button type="submit" disabled={busy || !hydrated} aria-busy={!hydrated || busy} size="lg">
+        {!hydrated
+          ? 'Loading form…'
+          : phase === 'uploading'
+            ? 'Uploading…'
+            : phase === 'creating'
+              ? 'Queueing…'
+              : 'Build Campaign'}
       </Button>
     </form>
   );
