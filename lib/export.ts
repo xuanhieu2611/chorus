@@ -1,4 +1,9 @@
 import type { AssetRow, CampaignReviewRow, CampaignRow } from '@/lib/db/client';
+import {
+  positiveFiniteNumber,
+  totalPassedVideoDuration,
+  videoBudgetError,
+} from '@/lib/video-budget';
 
 /** Only Critic-passed assets are eligible for the final package. */
 export const EXPORTABLE_ASSET_STATUS = 'passed' as const;
@@ -59,7 +64,20 @@ export function exportAssetProblems(asset: AssetRow): string[] {
   }
   if (asset.content === null) problems.push('content is missing');
   if (asset.type === 'short_video' && !asset.media_path) problems.push('local media path is missing');
+  if (asset.type === 'short_video' && positiveFiniteNumber(asset.duration_sec) === null) {
+    problems.push('rendered duration is missing');
+  }
   return problems;
+}
+
+export function exportVideoBudgetProblem(
+  campaign: Pick<CampaignRow, 'max_video_seconds'>,
+  assets: AssetRow[],
+): string | null {
+  return videoBudgetError(
+    totalPassedVideoDuration(assets),
+    campaign.max_video_seconds,
+  );
 }
 
 export function safeFilename(value: string): string {

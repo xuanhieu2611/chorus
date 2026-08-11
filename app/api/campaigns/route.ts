@@ -23,8 +23,16 @@ const CreateCampaign = z.object({
   audience: z.string().trim().max(500).optional(),
   brand_voice: z.string().trim().max(500).optional(),
   platforms: z.array(z.enum(['tiktok', 'x', 'linkedin'])).min(1).optional(),
-  max_assets: z.number().int().min(1).max(12).optional(),
-  max_video_seconds: z.number().int().min(15).max(600).optional(),
+  // The effective cap is checked against env.maxAssets below because it can be
+  // lowered by MAX_ASSETS at runtime, while the MVP ceiling stays at six.
+  max_assets: z.number().int().min(1).optional(),
+  /** Aggregate allowance shared by every short-video asset in the campaign. */
+  max_video_seconds: z
+    .number({ error: 'Maximum total video seconds must be a number.' })
+    .int('Maximum total video seconds must be a whole number.')
+    .min(15, 'Maximum total video seconds must be at least 15 seconds.')
+    .max(600, 'Maximum total video seconds must be at most 600 seconds.')
+    .optional(),
 });
 
 export async function POST(request: Request): Promise<Response> {
@@ -37,12 +45,25 @@ export async function POST(request: Request): Promise<Response> {
 
   const parsed = CreateCampaign.safeParse(body);
   if (!parsed.success) {
+    const issue =
+      parsed.error.issues.find((item) => item.path[0] === 'max_video_seconds') ??
+      parsed.error.issues[0];
     return Response.json(
-      { error: 'Invalid campaign.', issues: z.treeifyError(parsed.error) },
+      {
+        error: issue?.message ?? 'Invalid campaign.',
+        issues: z.treeifyError(parsed.error),
+      },
       { status: 400 },
     );
   }
   const input = parsed.data;
+
+  if (input.max_assets !== undefined && input.max_assets > env.maxAssets) {
+    return Response.json(
+      { error: `Maximum assets is ${env.maxAssets} in the MVP.` },
+      { status: 400 },
+    );
+  }
 
   const pendingDir = pendingUploadDir(input.upload_token);
   const sourceName = await findSourceFile(pendingDir);
@@ -66,7 +87,7 @@ export async function POST(request: Request): Promise<Response> {
       brand_voice: input.brand_voice ?? null,
       ...(input.platforms ? { platforms: input.platforms } : {}),
       ...(input.max_assets ? { max_assets: input.max_assets } : {}),
-      ...(input.max_video_seconds ? { max_video_seconds: input.max_video_seconds } : {}),
+      ...(input.max_video_seconds !== undefined ? { max_video_seconds: input.max_video_seconds } : {}),
       credit_budget: env.defaultCreditBudget,
       status: 'ingesting',
     })

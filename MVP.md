@@ -219,6 +219,7 @@ create table public.campaigns (
   brand_voice         text,
   platforms           text[] not null default '{tiktok,x,linkedin}',
   max_assets          int  not null default 6,
+  -- Aggregate allowance shared by all final short-video assets, not per clip.
   max_video_seconds   int  not null default 120,
   credit_budget       int  not null default 12,
   credits_spent       int  not null default 0,
@@ -546,7 +547,7 @@ Target 10 to 20 surviving segments. Emit `"Found N candidate topics"` as a decis
 
 ### 7.2 Content Strategist
 
-**Model:** `MODEL_REASONING`. **Input:** all segments (scores only, plus 200 char summaries), goal, audience, platforms, credit budget, max assets, max video seconds.
+**Model:** `MODEL_REASONING`. **Input:** all segments (scores only, plus 200 char summaries), goal, audience, platforms, credit budget, max assets, and the campaign-wide maximum total video seconds.
 
 Must output rejections with reasons. The rejected list is a first-class UI element and one of the clearest proofs the system is deciding rather than executing.
 
@@ -565,9 +566,13 @@ const StrategySchema = z.object({
 });
 ```
 
-Validate in code, not in the prompt: `sum(credits) <= credit_budget`, `count <= max_assets`, video assets within `max_video_seconds`. On violation, feed the specific violation back and retry once, then fail the node. LLMs do arithmetic badly; the constraint is enforced by the runtime.
+Validate in code, not in the prompt: `sum(credits) <= planning budget`, `count <= max_assets`, and the sum of bounded planned short-video durations must be at or below the campaign-wide `max_video_seconds`. Written assets do not consume video seconds. On violation, feed the specific violation back and retry once, then fail the node. LLMs do arithmetic badly; the constraint is enforced by the runtime.
 
 Costs: clip 3, thread 2, LinkedIn post 2, regeneration 1.
+
+The planning budget is not the whole campaign budget. `lib/credit-budget.ts` holds back `CRITIQUE_RESERVE_RATIO` of `credit_budget` for the critique loop, which pays 1 per regeneration and full price for a replacement asset while the rejected one keeps what it already spent. The Strategist only ever sees the planning share. The reserve yields when it would drop the planning budget below the two assets the contract requires.
+
+Running out mid-portfolio abandons the affected asset and continues; it is a planning outcome, not a campaign failure. `produce`, `critique`, and `select_alternative` each check affordability before reserving, so `begin_asset_generation` never raises on a campaign that simply ran out.
 
 ### 7.3 Content Director
 
@@ -841,7 +846,7 @@ Boundaries are code's, not the model's. `snapToWords` pulls every proposed span 
 Strategy generation with code-enforced budget validation. Director review with its `REJECT` to `strategize` loop. Strategy approval gate and resume-from-gate.
 **Done:** a plan appears with rejected topics and reasons, you approve it in the browser, and the worker resumes.
 
-**Built.** `lib/agents/strategist.ts`, `lib/agents/director.ts`, the versioned strategy tools, all three Phase 3 graph nodes, the approval route, and the dashboard strategy panel. Runtime validation owns fixed credit costs, the total budget, enabled platforms, stable plan keys, real segment ids, the asset cap, and clip duration. A schema-valid plan that breaks one of those relationships gets one retry with the exact violations.
+**Built.** `lib/agents/strategist.ts`, `lib/agents/director.ts`, the versioned strategy tools, all three Phase 3 graph nodes, the approval route, and the dashboard strategy panel. Runtime validation owns fixed credit costs, the total budget, enabled platforms, stable plan keys, real segment ids, the asset cap, and the aggregate short-video duration. A schema-valid plan that breaks one of those relationships gets one retry with the exact violations.
 
 Paid decisions are resumable. A saved strategy with no revision request is reused after a crash, and the Director's successful `agent_runs.output` is the durable review record. Director and human rejections create a new strategy version; `replan_count` is advanced in code and capped before another model call. The gate route writes human feedback before requeueing and sets the resume node explicitly: approval goes to `produce`, while a change request goes to `strategize`. Merely setting `status = 'queued'` would re-enter the gate forever.
 
@@ -859,7 +864,7 @@ Until the Critic lands in Phase 6, `produce` sweeps all written assets so both p
 The full media pipeline. Draft cut, inspection, boundary adjustment, final 9:16 render with burned captions, upload to Supabase Storage. Build the video path first, then add the `has_video_stream` branch from section 9.1.
 **Done:** a vertical MP4 with captions plays in the browser. Automated test asserts rendered duration matches the requested boundaries within 100 ms. **Run the same test with an MP3 source** and confirm it renders a caption card without making a single vision call.
 
-**Built.** `lib/agents/clip-producer.ts`, the video tool layer, ASS subtitle generation, both final-render branches, the public `assets` Storage bucket, and inline dashboard playback. The producer chooses one contiguous span, snaps every proposed or adjusted edge onto real word timestamps, leaves 300 ms after the final word, and permits at most two draft adjustments. Video inspection combines `silencedetect`, six chronological 512 px frames, and the opening word timings through `MODEL_VISION`. Audio inspection is deterministic and cannot call the vision function.
+**Built.** `lib/agents/clip-producer.ts`, the video tool layer, ASS subtitle generation, both final-render branches, the public `assets` Storage bucket, and inline dashboard playback. The producer chooses one contiguous span, snaps every proposed or adjusted edge onto real word timestamps, leaves 300 ms after the final word, and receives only the remaining campaign-wide video allowance for that asset. Video inspection combines `silencedetect`, six chronological 512 px frames, and the opening word timings through `MODEL_VISION`. Audio inspection is deterministic and cannot call the vision function.
 
 Homebrew's regular `ffmpeg` bottle omits libass, so Phase 5 corrected the prerequisite to keg-only `ffmpeg-full` and points `FFMPEG_PATH`/`FFPROBE_PATH` at its explicit paths. `lib/media/render.test.ts` renders synthetic video and MP3 fixtures through the real final commands. Both outputs are postable MP4s and both must match the requested span within 100 ms; the MP3 test also injects a throwing vision spy and proves it is never invoked.
 
@@ -887,7 +892,7 @@ Campaign Reviewer rows and Critic revision rows have unique idempotency keys. Th
 Zip export with `campaign.md`. Empty, loading, and failure states. Failure recovery from any node. README with the architecture diagram. Record the demo.
 **Done:** section 1's definition of done passes on a clean clone.
 
-**Built.** The final review page and `GET /api/campaigns/[id]/export` stream a ZIP with `campaign.md`, written assets as Markdown, and only Critic-passed clips and posts. Paths are sanitized and validated beneath `STORAGE_DIR`; media is streamed by archiver rather than loaded into one large buffer. The `finalize` graph node validates the passed portfolio before marking the campaign complete. Dashboard and review routes include loading, empty, failure, failed-campaign, and retry guidance states. Failed campaigns retry from their durable `current_node`, and the worker claim RPC reclaims only active rows whose heartbeat is stale while preserving `FOR UPDATE SKIP LOCKED` concurrency safety and ownership fencing.
+**Built.** The final review page and `GET /api/campaigns/[id]/export` stream a ZIP with `campaign.md`, written assets as Markdown, and only Critic-passed clips and posts. Paths are sanitized and validated beneath `STORAGE_DIR`; media is streamed by archiver rather than loaded into one large buffer. The `finalize` graph node validates the passed portfolio, including the aggregate duration of passed short videos, before marking the campaign complete. The export route repeats that budget check as a backstop. Dashboard and review routes include loading, empty, failure, failed-campaign, and retry guidance states. Failed campaigns retry from their durable `current_node`, and the worker claim RPC reclaims only active rows whose heartbeat is stale while preserving `FOR UPDATE SKIP LOCKED` concurrency safety and ownership fencing.
 
 Realistic effort: roughly 55 to 75 focused hours. Phase 5 and Phase 6 are the two that will overrun.
 

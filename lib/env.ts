@@ -27,6 +27,8 @@ function positiveNum(name: string, fallback: number): number {
   return value;
 }
 
+const MVP_MAX_ASSETS = 6;
+
 export const env = {
   get openrouterApiKey() {
     return required('OPENROUTER_API_KEY');
@@ -85,8 +87,16 @@ export const env = {
   get maxCampaignReplans() {
     return num('MAX_CAMPAIGN_REPLANS', 2);
   },
+  /**
+   * The user-facing and graph-level cap. MVP never allows more than six
+   * assets, even if MAX_ASSETS is configured higher for another environment.
+   */
   get maxAssets() {
-    return num('MAX_ASSETS', 6);
+    const configured = num('MAX_ASSETS', MVP_MAX_ASSETS);
+    if (!Number.isInteger(configured) || configured < 1) {
+      throw new Error(`Env var MAX_ASSETS must be a positive integer, got "${configured}".`);
+    }
+    return Math.min(configured, MVP_MAX_ASSETS);
   },
   get defaultCreditBudget() {
     return num('DEFAULT_CREDIT_BUDGET', 12);

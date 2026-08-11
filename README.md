@@ -73,7 +73,7 @@ flowchart TD
 
 ## Export and inspection
 
-The final review is at `/campaigns/[id]/review`. After final approval and successful `finalize`, `GET /api/campaigns/[id]/export` streams a ZIP containing `campaign.md`, Markdown written assets, and only assets whose status is exactly `passed`. Rejected, abandoned, replaced, planned, generating, revising, and needs-review rows never enter the package. Clip files are added from validated paths beneath `STORAGE_DIR` without buffering the media into memory.
+The final review is at `/campaigns/[id]/review`. The **Maximum total video seconds** campaign setting is one shared allowance across all final short-video assets, while written assets consume none of it. The Strategist validates the aggregate plan, production passes each clip only its remaining allowance, and `finalize` checks the measured durations again before completion. After final approval and successful `finalize`, `GET /api/campaigns/[id]/export` streams a ZIP containing `campaign.md`, Markdown written assets, and only assets whose status is exactly `passed`. Rejected, abandoned, replaced, planned, generating, revising, and needs-review rows never enter the package. Clip files are added from validated paths beneath `STORAGE_DIR` without buffering the media into memory.
 
 Clip inspection is intentionally modest and honest: silence detection, sampled frames for video sources, and transcript word timing. It is not true video understanding. Silence detection does most of the useful work. Audio-only sources skip frame sampling and the vision call, then render caption-card audiograms at 9:16 instead of pretending there is a talking-head video.
 

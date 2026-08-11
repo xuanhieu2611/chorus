@@ -12,6 +12,7 @@ create table public.campaigns (
   brand_voice         text,
   platforms           text[] not null default '{tiktok,x,linkedin}',
   max_assets          int  not null default 6,
+  -- Aggregate allowance shared by all final short-video assets, not per clip.
   max_video_seconds   int  not null default 120,
   credit_budget       int  not null default 12,
   credits_spent       int  not null default 0,

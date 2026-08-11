@@ -226,8 +226,8 @@ LinkedIn
 Maximum assets:
 6
 
-Maximum short-form video:
-120 seconds
+Maximum total short-form video:
+120 seconds shared across all short-video assets
 ```
 
 ---
@@ -415,8 +415,8 @@ Generation budget:
 Max assets:
 6
 
-Max video:
-120 seconds
+Max total video:
+120 seconds shared across all short-video assets
 ```
 
 Possible costs:

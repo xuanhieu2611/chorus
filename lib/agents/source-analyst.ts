@@ -63,8 +63,8 @@ export const MAX_SEGMENTS = 20;
 /**
  * The floor asked of the reduce pass. Not enforced in code, deliberately: a
  * genuinely thin source should yield few segments rather than padded ones, and
- * the Strategist's `min(2)` on planned assets is where a too-thin analysis
- * actually surfaces as a failure.
+ * the Strategist's two-asset minimum, enforced in `validateStrategy`, is where a
+ * too-thin analysis actually surfaces as a failure.
  */
 const MIN_TARGET_SEGMENTS = 8;
 
@@ -94,11 +94,13 @@ export type ContentType = (typeof CONTENT_TYPES)[number];
  * The map schema. Deliberately not the final segment shape: no `novelty_score`,
  * because nothing inside one window can tell you whether a point is fresh.
  *
- * Numeric ranges are enforced by the schema because a score outside 0..1 is a
- * semantic error the repair pass can genuinely fix. Array and string *lengths*
- * are not, and that is deliberate: strict schema mode is not in effect through
- * OpenRouter (see `docs/ARCHITECTURE.md`), so a `.max(3)` on hooks buys a whole
- * extra round trip to fix something `.slice(0, 3)` fixes for free.
+ * No bound of any kind is expressed in this schema. Lengths were always left to
+ * code because strict schema mode is not in effect through OpenRouter (see
+ * `docs/ARCHITECTURE.md`), so a `.max(3)` on hooks buys a whole extra round trip
+ * to fix something `.slice(0, 3)` fixes for free. Numeric ranges joined them
+ * once a provider rejected `minimum`/`maximum` outright: the same model id can be
+ * served by several providers, and a campaign must not depend on which one
+ * answered. `clamp01` at the merge step is what actually holds scores in 0..1.
  */
 const CandidateSchema = z.object({
   start_time: z.number(),
@@ -106,13 +108,16 @@ const CandidateSchema = z.object({
   topic: z.string(),
   summary: z.string(),
   content_type: z.enum(CONTENT_TYPES),
-  energy: z.number().min(0).max(1),
-  standalone_score: z.number().min(0).max(1),
+  // Bounds live in `clamp01` at the merge step, not in the schema: some
+  // OpenRouter providers reject `minimum`/`maximum` outright. See
+  // `lib/agents/critic.ts` for the failure this came from.
+  energy: z.number(),
+  standalone_score: z.number(),
   potential_hooks: z.array(z.string()),
   context_deps: z.string().nullable(),
 });
 
-const MapSchema = z.object({
+export const MapSchema = z.object({
   candidates: z.array(CandidateSchema),
 });
 
@@ -122,11 +127,15 @@ const MapSchema = z.object({
  * the ids show up in the timeline when the analyst folds a duplicate away.
  */
 const ReducedSegmentSchema = CandidateSchema.extend({
-  candidate_ids: z.array(z.number().int()),
-  novelty_score: z.number().min(0).max(1),
+  // Not `.int()`: Zod renders that as an `integer` carrying safe-integer
+  // `minimum`/`maximum`, which is the exact keyword pair Azure rejects. These
+  // ids are audit metadata for the timeline, never arithmetic, so the looser
+  // type costs nothing.
+  candidate_ids: z.array(z.number()),
+  novelty_score: z.number(),
 });
 
-const ReduceSchema = z.object({
+export const ReduceSchema = z.object({
   reasoning: z.string(),
   segments: z.array(ReducedSegmentSchema),
 });

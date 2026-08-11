@@ -4,14 +4,30 @@ import { callStructured } from '@/lib/llm/structured';
 
 const SCORE_FIELDS = ['hook', 'clarity', 'standalone', 'originality', 'audience_fit', 'payoff'] as const;
 
+/**
+ * The 1 to 10 range is enforced by `decideCritic`, not by the schema.
+ *
+ * `minimum`/`maximum` become JSON Schema keywords that some OpenRouter providers
+ * reject outright: a reduce pass on `anthropic/claude-sonnet-4.5` routed to Azure
+ * failed every attempt with "For 'number' type, properties maximum, minimum are
+ * not supported", and one model id can be served by several providers. A bound
+ * that decides a campaign's routing cannot depend on which one answered, so it
+ * lives in code like every other decision here.
+ */
 export const CriticScoresSchema = z.object({
-  hook: z.number().min(1).max(10),
-  clarity: z.number().min(1).max(10),
-  standalone: z.number().min(1).max(10),
-  originality: z.number().min(1).max(10),
-  audience_fit: z.number().min(1).max(10),
-  payoff: z.number().min(1).max(10),
+  hook: z.number(),
+  clarity: z.number(),
+  standalone: z.number(),
+  originality: z.number(),
+  audience_fit: z.number(),
+  payoff: z.number(),
 });
+
+/** Hold a score inside 1 to 10; a non-finite score is treated as the floor. */
+export function clampScore(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(10, Math.max(1, value));
+}
 
 /** The model supplies scores and actionable feedback. TypeScript owns the edge. */
 export const CriticSchema = z.object({
@@ -125,7 +141,7 @@ export async function critiqueAsset(input: CriticInput): Promise<CriticReview> {
  * prompt so the same scores always take the same graph edge.
  */
 export function decideCritic(scores: CriticScores): CriticRouting {
-  const values = SCORE_FIELDS.map((field) => scores[field]);
+  const values = SCORE_FIELDS.map((field) => clampScore(scores[field]));
   const average = values.reduce((sum, value) => sum + value, 0) / values.length;
   const lowest = Math.min(...values);
 

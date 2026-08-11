@@ -22,7 +22,7 @@ type Phase = 'idle' | 'uploading' | 'creating';
  * reason: a 90 minute recording is 1 to 3 GB and `fetch` reports no upload
  * progress. A multi-minute upload with no progress bar reads as a hung page.
  */
-export function NewCampaignForm() {
+export function NewCampaignForm({ maxAssets }: { maxAssets: number }) {
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
   const [phase, setPhase] = useState<Phase>('idle');
@@ -148,10 +148,22 @@ export function NewCampaignForm() {
           <div className="flex gap-4">
             <div className="flex flex-1 flex-col gap-2">
               <Label htmlFor="max_assets">Max assets</Label>
-              <Input id="max_assets" name="max_assets" type="number" min={1} max={12} defaultValue={6} disabled={busy} />
+              <Input
+                id="max_assets"
+                name="max_assets"
+                type="number"
+                min={1}
+                max={maxAssets}
+                defaultValue={maxAssets}
+                aria-describedby="max_assets_help"
+                disabled={busy}
+              />
+              <p id="max_assets_help" className="text-muted-foreground text-xs">
+                Up to {maxAssets} assets in the MVP.
+              </p>
             </div>
             <div className="flex flex-1 flex-col gap-2">
-              <Label htmlFor="max_video_seconds">Max clip seconds</Label>
+              <Label htmlFor="max_video_seconds">Maximum total video seconds</Label>
               <Input
                 id="max_video_seconds"
                 name="max_video_seconds"
@@ -159,8 +171,12 @@ export function NewCampaignForm() {
                 min={15}
                 max={600}
                 defaultValue={120}
+                aria-describedby="max_video_seconds_help"
                 disabled={busy}
               />
+              <p id="max_video_seconds_help" className="text-muted-foreground text-xs">
+                Shared across all short-video assets, not applied separately to each clip.
+              </p>
             </div>
           </div>
         </div>

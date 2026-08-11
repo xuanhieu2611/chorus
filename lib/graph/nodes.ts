@@ -16,9 +16,11 @@ import { analyzeSource } from '@/lib/agents/source-analyst';
 import {
   CREDIT_COST,
   createStrategy,
+  normalizeReplan,
   replanStrategy,
   selectAlternative,
   validateReplan,
+  validateStrategy,
   type PlannedAsset,
 } from '@/lib/agents/strategist';
 import { produceClip } from '@/lib/agents/clip-producer';
@@ -34,6 +36,18 @@ import {
   resolveSourcePath,
 } from '@/lib/media/paths';
 import { PROVIDER, transcribeAudio } from '@/lib/media/transcribe';
+import {
+  plannedVideoDurationForAsset,
+  remainingVideoBudget,
+  totalPassedVideoDuration,
+  videoBudgetError,
+} from '@/lib/video-budget';
+import {
+  REVISION_CREDIT_COST,
+  canAffordCredits,
+  planningCreditBudget,
+  remainingCredits,
+} from '@/lib/credit-budget';
 import {
   abandonAsset,
   beginAssetGeneration,
@@ -343,7 +357,7 @@ const strategize: NodeFn = async (ctx): Promise<NodeResult> => {
     audience: campaign.audience,
     brandVoice: campaign.brand_voice,
     platforms: campaign.platforms,
-    creditBudget: campaign.credit_budget,
+    creditBudget: planningCreditBudget(campaign.credit_budget),
     maxAssets,
     maxVideoSeconds: campaign.max_video_seconds,
     requiredChanges: revision?.requiredChanges,
@@ -491,10 +505,86 @@ const produce: NodeFn = async (ctx): Promise<NodeResult> => {
 
   const segmentById = new Map(segments.map((segment) => [segment.id, segment]));
   const sources = sourceInputs(planned, segmentById);
+  const videoBudget =
+    planned.type === 'short_video'
+      ? remainingVideoBudget({
+          maxVideoSeconds: campaign.max_video_seconds,
+          plannedAssets: plan.planned_assets,
+          segments,
+          assets,
+          excludePlanKey: planned.plan_key,
+        })
+      : null;
+
+  if (planned.type === 'short_video') {
+    const plannedDuration = plannedVideoDurationForAsset(
+      planned,
+      segments,
+      campaign.max_video_seconds,
+    );
+    if (
+      videoBudget === null ||
+      videoBudget <= 0.000001 ||
+      plannedDuration <= 0 ||
+      plannedDuration > videoBudget + 0.000001
+    ) {
+      const allowance = videoBudget ?? 0;
+      const abandoned = await abandonAsset(asset.id);
+      await emit({
+        campaignId,
+        agent: 'system',
+        node: 'produce',
+        level: 'warn',
+        message: `${planned.plan_key}: no legal duration remains in the campaign-wide video budget (needs ${plannedDuration.toFixed(2)}s, ${allowance.toFixed(2)}s remains); abandoning the asset.`,
+        data: {
+          asset_id: abandoned.id,
+          plan_key: planned.plan_key,
+          planned_duration_sec: plannedDuration,
+          remaining_video_seconds: allowance,
+          status: abandoned.status,
+        },
+      });
+      return {
+        next: 'produce',
+        reason: `Abandoned ${planned.plan_key}; its planned video duration does not fit the remaining campaign-wide allowance.`,
+      };
+    }
+  }
+
   const isRevision = asset.revision_count > 0 || asset.status === 'revising';
+
+  // An asset already in `generating` was charged by an earlier run, so re-entering
+  // it after a crash must not be blocked by an exhausted budget. Everything else
+  // abandons rather than throwing: running out of credits mid-portfolio is a
+  // planning outcome, not a failure, and the campaign still ships what it funded.
+  const creditsNeeded = isRevision ? REVISION_CREDIT_COST : planned.credits;
+  if (asset.status !== 'generating' && !canAffordCredits(campaign, creditsNeeded)) {
+    const abandoned = await abandonAsset(asset.id);
+    await emit({
+      campaignId,
+      agent: 'system',
+      node: 'produce',
+      level: 'warn',
+      message: `${planned.plan_key}: ${remainingCredits(campaign)} of ${campaign.credit_budget} credits remain, short of the ${creditsNeeded} this ${isRevision ? 'revision' : 'asset'} needs; abandoning it.`,
+      data: {
+        asset_id: abandoned.id,
+        plan_key: planned.plan_key,
+        credits_needed: creditsNeeded,
+        credits_remaining: remainingCredits(campaign),
+        credits_spent: campaign.credits_spent,
+        credit_budget: campaign.credit_budget,
+        status: abandoned.status,
+      },
+    });
+    return {
+      next: 'produce',
+      reason: `Abandoned ${planned.plan_key}; the campaign credit budget cannot fund it. Production continues with the assets it can afford.`,
+    };
+  }
+
   const previousReview = isRevision ? await getLatestReview(asset.id) : null;
   const revisionFeedback = previousReview?.feedback ?? null;
-  const remainingCredits = isRevision
+  const creditsLeft = isRevision
     ? await beginAssetRevision(asset.id)
     : await beginAssetGeneration(asset.id, planned.credits);
 
@@ -511,7 +601,8 @@ const produce: NodeFn = async (ctx): Promise<NodeResult> => {
       source_segment_ids: planned.segment_ids,
       revision_count: asset.revision_count,
       revision_feedback: revisionFeedback,
-      remaining_credits: remainingCredits,
+      remaining_credits: creditsLeft,
+      video_budget_remaining_sec: videoBudget,
     },
   });
 
@@ -560,7 +651,7 @@ const produce: NodeFn = async (ctx): Promise<NodeResult> => {
     segmentIds: planned.segment_ids,
     topic: planned.topic,
     purpose: planned.purpose,
-    maxVideoSeconds: campaign.max_video_seconds,
+    maxVideoSeconds: videoBudget ?? campaign.max_video_seconds,
     sourceDurationSec: Number(campaign.source_duration_sec),
     hasVideoStream: campaign.has_video_stream,
     goal: campaign.goal,
@@ -568,6 +659,12 @@ const produce: NodeFn = async (ctx): Promise<NodeResult> => {
     brandVoice: campaign.brand_voice,
     revisionFeedback,
   });
+  const outputBudgetError = videoBudgetError(
+    output.durationSec,
+    videoBudget ?? campaign.max_video_seconds,
+    `${planned.plan_key} rendered video`,
+  );
+  if (outputBudgetError) throw new Error(outputBudgetError);
   const saved = await saveVideoAsset(asset.id, output);
   await emit({
     campaignId,
@@ -681,6 +778,29 @@ const critique: NodeFn = async (ctx): Promise<NodeResult> => {
   }
 
   if (routing.decision === 'REVISE') {
+    if (
+      asset.revision_count < env.maxRevisionsPerAsset &&
+      !canAffordCredits(campaign, REVISION_CREDIT_COST)
+    ) {
+      await emit({
+        campaignId,
+        agent: 'content_critic',
+        node: 'critique',
+        level: 'warn',
+        message: `${asset.plan_key}: the Critic asked for a revision, but ${remainingCredits(campaign)} of ${campaign.credit_budget} credits remain; the asset will be abandoned.`,
+        data: {
+          asset_id: asset.id,
+          revision_count: asset.revision_count,
+          credits_remaining: remainingCredits(campaign),
+          credit_budget: campaign.credit_budget,
+        },
+      });
+      return {
+        next: 'abandon_asset',
+        reason: `Critic REVISE for ${asset.plan_key}, but the campaign credit budget cannot fund another revision.`,
+      };
+    }
+
     if (asset.revision_count < env.maxRevisionsPerAsset) {
       const revised = await prepareAssetRevision(asset.id, asset.revision_count);
       return {
@@ -722,6 +842,31 @@ const selectAlternativeNode: NodeFn = async (ctx): Promise<NodeResult> => {
     };
   }
 
+  // A replacement is charged at full price. Searching for one the budget cannot
+  // pay for would spend a reasoning call to build an asset `produce` must
+  // immediately abandon, so the shortfall is caught before the Strategist runs.
+  const replacementCost = CREDIT_COST[rejected.type as PlannedAsset['type']] ?? 0;
+  if (!canAffordCredits(campaign, replacementCost)) {
+    await emit({
+      campaignId,
+      agent: 'system',
+      node: 'select_alternative',
+      level: 'warn',
+      message: `${rejected.plan_key}: a replacement costs ${replacementCost} credits and only ${remainingCredits(campaign)} of ${campaign.credit_budget} remain; abandoning the rejected asset instead.`,
+      data: {
+        asset_id: rejected.id,
+        plan_key: rejected.plan_key,
+        credits_needed: replacementCost,
+        credits_remaining: remainingCredits(campaign),
+        credit_budget: campaign.credit_budget,
+      },
+    });
+    return {
+      next: 'abandon_asset',
+      reason: `No replacement is searched for ${rejected.plan_key}; the campaign credit budget cannot fund another asset of its type.`,
+    };
+  }
+
   const strategy = await getLatestStrategy(campaignId);
   if (!strategy) throw new Error('Alternative selection reached without a saved strategy.');
   const plan = planFromStrategy(strategy);
@@ -746,23 +891,52 @@ const selectAlternativeNode: NodeFn = async (ctx): Promise<NodeResult> => {
     throw new Error(`Rejected asset ${rejected.plan_key} has no durable REJECT review.`);
   }
 
-  const candidates = (await getUnusedSegments(campaignId)).filter(
-    (segment) =>
-      original.type !== 'short_video' ||
-      Number(segment.end_time) - Number(segment.start_time) <= campaign.max_video_seconds,
-  );
+  const [unusedSegments, segments] = await Promise.all([
+    getUnusedSegments(campaignId),
+    getSegments(campaignId),
+  ]);
+  const remainingVideoSeconds =
+    original.type === 'short_video'
+      ? remainingVideoBudget({
+          maxVideoSeconds: campaign.max_video_seconds,
+          plannedAssets: plan.planned_assets,
+          segments,
+          assets,
+          excludePlanKey: rejected.plan_key,
+        })
+      : null;
+  const candidates = unusedSegments.filter((segment) => {
+    if (original.type !== 'short_video') return true;
+    if (remainingVideoSeconds === null || remainingVideoSeconds <= 0.000001) return false;
+    const candidateDuration = plannedVideoDurationForAsset(
+      { ...original, segment_ids: [segment.id] },
+      segments,
+      campaign.max_video_seconds,
+    );
+    return candidateDuration > 0 && candidateDuration <= remainingVideoSeconds + 0.000001;
+  });
   if (candidates.length === 0) {
+    const remaining = remainingVideoSeconds === null ? null : remainingVideoSeconds.toFixed(2);
     await emit({
       campaignId,
       agent: 'content_strategist',
       node: 'select_alternative',
       level: 'warn',
-      message: `No unused segment can replace ${rejected.plan_key}; the asset will be abandoned.`,
-      data: { asset_id: rejected.id },
+      message:
+        original.type === 'short_video'
+          ? `No unused segment can replace ${rejected.plan_key} within the ${remaining}s of video budget remaining; the asset will be abandoned.`
+          : `No unused segment can replace ${rejected.plan_key}; the asset will be abandoned.`,
+      data: {
+        asset_id: rejected.id,
+        remaining_video_seconds: remainingVideoSeconds,
+      },
     });
     return {
       next: 'abandon_asset',
-      reason: `No unused source segment is eligible for ${rejected.plan_key}; abandoning the rejected asset.`,
+      reason:
+        original.type === 'short_video'
+          ? `No unused source segment fits the remaining campaign-wide video allowance for ${rejected.plan_key}; abandoning the rejected asset.`
+          : `No unused source segment is eligible for ${rejected.plan_key}; abandoning the rejected asset.`,
     };
   }
 
@@ -776,20 +950,82 @@ const selectAlternativeNode: NodeFn = async (ctx): Promise<NodeResult> => {
       rejectionFeedback: review.feedback,
       assetType: original.type,
       candidates,
+      remainingVideoSeconds: remainingVideoSeconds ?? undefined,
       goal: campaign.goal,
       audience: campaign.audience,
       brandVoice: campaign.brand_voice,
     }));
-  const chosen = candidates.find((candidate) => candidate.id === selection.segment_id);
+  let chosen = candidates.find((candidate) => candidate.id === selection.segment_id);
   if (!chosen) throw new Error(`Alternative selection returned unknown segment ${selection.segment_id}.`);
 
-  const replacement: PlannedAsset = {
+  const replacementPlanKey = nextAlternativePlanKey(rejected.plan_key, assets);
+  const makeReplacement = (candidate: SegmentRow): PlannedAsset => ({
     ...original,
-    plan_key: nextAlternativePlanKey(rejected.plan_key, assets),
-    topic: chosen.topic,
-    segment_ids: [chosen.id],
+    plan_key: replacementPlanKey,
+    topic: candidate.topic,
+    segment_ids: [candidate.id],
     credits: CREDIT_COST[original.type],
-  };
+  });
+  let replacement = makeReplacement(chosen);
+  let replacementViolations = validateStrategy(
+    {
+      ...plan,
+      planned_assets: plan.planned_assets.map((asset) =>
+        asset.plan_key === rejected.plan_key ? replacement : asset,
+      ),
+    },
+    segments,
+    {
+      creditBudget: planningCreditBudget(campaign.credit_budget),
+      maxAssets: Math.min(campaign.max_assets, env.maxAssets),
+      maxVideoSeconds: campaign.max_video_seconds,
+      platforms: campaign.platforms,
+    },
+  );
+
+  if (replacementViolations.length > 0) {
+    const fallback = candidates.find((candidate) => {
+      if (candidate.id === chosen?.id) return false;
+      const candidateReplacement = makeReplacement(candidate);
+      return validateStrategy(
+        {
+          ...plan,
+          planned_assets: plan.planned_assets.map((asset) =>
+            asset.plan_key === rejected.plan_key ? candidateReplacement : asset,
+          ),
+        },
+        segments,
+        {
+          creditBudget: campaign.credit_budget,
+          maxAssets: Math.min(campaign.max_assets, env.maxAssets),
+          maxVideoSeconds: campaign.max_video_seconds,
+          platforms: campaign.platforms,
+        },
+      ).length === 0;
+    });
+    if (!fallback) {
+      await emit({
+        campaignId,
+        agent: 'content_strategist',
+        node: 'select_alternative',
+        level: 'warn',
+        message: `The selected alternatives for ${rejected.plan_key} cannot fit the remaining campaign-wide video budget; the asset will be abandoned.`,
+        data: {
+          asset_id: rejected.id,
+          remaining_video_seconds: remainingVideoSeconds,
+          violations: replacementViolations,
+        },
+      });
+      return {
+        next: 'abandon_asset',
+        reason: `No selected alternative for ${rejected.plan_key} satisfies the remaining campaign-wide video budget; abandoning the rejected asset.`,
+      };
+    }
+    chosen = fallback;
+    replacement = makeReplacement(chosen);
+    replacementViolations = [];
+  }
+
   await replacePlannedAsset(strategy, rejected.plan_key, replacement);
   await emit({
     campaignId,
@@ -813,10 +1049,17 @@ const selectAlternativeNode: NodeFn = async (ctx): Promise<NodeResult> => {
 
 /** Exclude a weak asset after its revision or alternative path is exhausted. */
 const abandonAssetNode: NodeFn = async (ctx): Promise<NodeResult> => {
-  const { campaignId } = ctx;
+  const { campaign, campaignId } = ctx;
   const assets = await getCampaignAssets(campaignId);
+  // The middle lookup exists because `critique` also abandons a REVISE that the
+  // credit budget cannot fund, and that asset is under the revision cap. Without
+  // it the node would find no target, return to `produce`, and cycle back into
+  // `critique` on the same durable output forever.
   const target =
     (await latestAssetWithDecision(assets, 'needs_review', 'REVISE', env.maxRevisionsPerAsset)) ??
+    (canAffordCredits(campaign, REVISION_CREDIT_COST)
+      ? null
+      : await latestAssetWithDecision(assets, 'needs_review', 'REVISE')) ??
     (await latestAssetWithDecision(assets, 'rejected', 'REJECT'));
 
   if (!target) {
@@ -1000,27 +1243,52 @@ const replan: NodeFn = async (ctx): Promise<NodeResult> => {
   );
 
   const targetVersion = sourceStrategy.version + 1;
+  const replanSegments = await getSegments(campaignId);
   const replanInput = {
     campaignId,
     previous: sourcePlan,
     review,
-    segments: await getSegments(campaignId),
+    segments: replanSegments,
+    existingAssets: currentAssets,
     targetVersion,
     occupiedPlanKeys: currentAssets.map((asset) => asset.plan_key),
     humanFeedback: humanFeedback ?? undefined,
     goal: campaign.goal,
     audience: campaign.audience,
     brandVoice: campaign.brand_voice,
-    creditBudget: campaign.credit_budget,
+    creditBudget: planningCreditBudget(campaign.credit_budget),
     maxAssets: Math.min(campaign.max_assets, env.maxAssets),
     maxVideoSeconds: campaign.max_video_seconds,
     platforms: campaign.platforms,
   };
+  // A durable proposal is raw model output from `agent_runs`: schema-valid, but
+  // it never went through the semantic checks or the normalizer, and the plan it
+  // was written against may have moved since. If it no longer holds, it is worth
+  // exactly nothing and the Strategist runs again. Throwing here instead failed a
+  // campaign on a stale proposal that a fresh call would have replaced.
   const durableRun = await getReplanRun(campaignId, sourceStrategy.version, targetVersion);
-  const proposed = durableRun?.plan ?? (await replanStrategy(replanInput));
+  const durablePlan = durableRun?.plan ?? null;
+  const staleViolations = durablePlan ? validateReplan(durablePlan, replanInput) : [];
+
+  if (durablePlan && staleViolations.length > 0) {
+    await emit({
+      campaignId,
+      agent: 'content_strategist',
+      node: 'replan',
+      level: 'warn',
+      message: `A saved replan proposal for v${targetVersion} no longer satisfies the campaign constraints; regenerating it. ${staleViolations.join('; ')}`,
+      data: { target_version: targetVersion, violations: staleViolations },
+    });
+  }
+
+  const proposed =
+    durablePlan && staleViolations.length === 0
+      ? normalizeReplan(durablePlan, replanInput)
+      : await replanStrategy(replanInput);
+
   const violations = validateReplan(proposed, replanInput);
   if (violations.length > 0) {
-    throw new Error(`Durable replan output is no longer valid: ${violations.join('; ')}`);
+    throw new Error(`Replan proposal is not legal: ${violations.join('; ')}`);
   }
 
   const newPlanKeys = new Set(proposed.planned_assets.map((asset) => asset.plan_key));
@@ -1073,6 +1341,13 @@ const finalize: NodeFn = async (ctx): Promise<NodeResult> => {
     exportAssetProblems(asset).map((problem) => `${asset.plan_key}: ${problem}`),
   );
   if (problems.length > 0) throw new Error(`Finalize found incomplete assets: ${problems.join('; ')}`);
+
+  const totalVideoSeconds = totalPassedVideoDuration(selected);
+  const videoBudgetProblem = videoBudgetError(
+    totalVideoSeconds,
+    ctx.campaign.max_video_seconds,
+  );
+  if (videoBudgetProblem) throw new Error(`Finalize rejected the portfolio: ${videoBudgetProblem}`);
 
   return {
     next: null,

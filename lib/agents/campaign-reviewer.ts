@@ -2,13 +2,25 @@ import { z } from 'zod';
 import { callStructured } from '@/lib/llm/structured';
 import type { Json } from '@/lib/db/database.types';
 
+/**
+ * Scores are 0 to 100, bounded by `clampReviewScore` rather than by the schema.
+ * `minimum`/`maximum` are JSON Schema keywords that some OpenRouter providers
+ * reject, and the diversity threshold below forces a replan, so the bound cannot
+ * depend on which provider served the request. See `lib/agents/critic.ts`.
+ */
 const CampaignReviewScoresSchema = z.object({
-  asset_quality: z.number().min(0).max(100),
-  diversity: z.number().min(0).max(100),
-  audience_fit: z.number().min(0).max(100),
-  brand_consistency: z.number().min(0).max(100),
-  overall: z.number().min(0).max(100),
+  asset_quality: z.number(),
+  diversity: z.number(),
+  audience_fit: z.number(),
+  brand_consistency: z.number(),
+  overall: z.number(),
 });
+
+/** Hold a score inside 0 to 100; a non-finite score is treated as the floor. */
+export function clampReviewScore(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(100, Math.max(0, value));
+}
 
 const RecommendationSchema = z.object({
   action: z.enum(['keep', 'replace']),
@@ -155,7 +167,7 @@ export async function reviewCampaign(input: CampaignReviewInput): Promise<Campai
 
 /** Deterministic Campaign Reviewer routing. */
 export function decideCampaignReview(review: CampaignReview): CampaignReviewRouting {
-  const forcedReplan = review.scores.diversity < 60;
+  const forcedReplan = clampReviewScore(review.scores.diversity) < 60;
   return {
     decision: forcedReplan ? 'REPLAN' : review.decision,
     forcedReplan,

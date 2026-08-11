@@ -9,6 +9,7 @@ import type { EventStreamStatus } from '@/components/useEventStream';
 
 interface AgentTimelineProps {
   events: CampaignEvent[];
+  liveEventIds: ReadonlySet<number>;
   connectionStatus: EventStreamStatus;
   connectionError: string | null;
   onRetry: () => void;
@@ -18,12 +19,14 @@ type EventOrder = 'newest' | 'oldest';
 
 export function AgentTimeline({
   events,
+  liveEventIds,
   connectionStatus,
   connectionError,
   onRetry,
 }: AgentTimelineProps) {
   const [agentFilter, setAgentFilter] = useState('all');
   const [order, setOrder] = useState<EventOrder>('newest');
+
   const agents = useMemo(
     () => [...new Set(events.map((event) => event.agent))].sort((left, right) => left.localeCompare(right)),
     [events],
@@ -94,7 +97,11 @@ export function AgentTimeline({
           ) : (
             <div className="divide-y">
               {visibleEvents.map((event) => (
-                <TimelineEvent key={event.id} event={event} />
+                <TimelineEvent
+                  key={event.id}
+                  event={event}
+                  isLive={liveEventIds.has(event.id)}
+                />
               ))}
             </div>
           )}
@@ -114,7 +121,8 @@ export function AgentTimeline({
   );
 }
 
-function TimelineEvent({ event }: { event: CampaignEvent }) {
+function TimelineEvent({ event, isLive }: { event: CampaignEvent; isLive: boolean }) {
+  const flash = isLive ? 'chorus-event--new' : '';
   const meta = (
     <div className="flex min-w-0 items-start gap-3">
       <time className="text-muted-foreground w-16 shrink-0 pt-0.5 font-mono text-[10px]" dateTime={event.created_at}>
@@ -132,7 +140,7 @@ function TimelineEvent({ event }: { event: CampaignEvent }) {
 
   if (event.level === 'tool') {
     return (
-      <details className="group px-4 py-3">
+      <details className={`group px-4 py-3 ${flash}`}>
         <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
           {meta}
           <div className="mt-1 flex items-start gap-2 pl-[7.25rem] text-sm">
@@ -146,7 +154,7 @@ function TimelineEvent({ event }: { event: CampaignEvent }) {
   }
 
   return (
-    <div className="px-4 py-3">
+    <div className={`px-4 py-3 ${flash}`}>
       {meta}
       <div className="mt-1 flex items-start gap-2 pl-[7.25rem] text-sm">
         <Badge variant={event.level === 'error' ? 'destructive' : 'outline'} className="mt-0.5 text-[9px]">
@@ -209,7 +217,15 @@ function ConnectionBadge({ status }: { status: EventStreamStatus }) {
     reconnecting: 'Reconnecting',
     error: 'Offline',
   }[status];
-  return <Badge variant={status === 'error' ? 'destructive' : status === 'connected' ? 'default' : 'secondary'}>{label}</Badge>;
+  return (
+    <Badge
+      variant={status === 'error' ? 'destructive' : status === 'connected' ? 'default' : 'secondary'}
+      className="gap-1.5"
+    >
+      {status === 'connected' && <span className="chorus-state-dot chorus-state-dot-active" />}
+      {label}
+    </Badge>
+  );
 }
 
 function formatTime(value: string): string {

@@ -83,7 +83,7 @@ Agents call `lib/tools/` and nothing else. No agent file imports the Supabase cl
 
 ## Phase 5 decisions
 
-**A boundary is a word fact, not a model fact.** The model proposes an absolute source span, but `snapClipBoundaries` constrains it to one selected segment, starts on a real word, ends 300 ms after the final included word, and enforces the campaign duration cap. The same function handles vision suggestions. A model cannot make ffmpeg seek outside the selected evidence or cut a word in half. The producer inspects the initial draft and permits at most two changed drafts; a repeated suggestion ends the loop rather than spending a third adjustment on identical media.
+**A boundary is a word fact, not a model fact.** The model proposes an absolute source span, but `snapClipBoundaries` constrains it to one selected segment, starts on a real word, ends 300 ms after the final included word, and enforces the remaining campaign-wide video allowance assigned to that asset. The same function handles vision suggestions. A model cannot make ffmpeg seek outside the selected evidence or cut a word in half. The producer inspects the initial draft and permits at most two changed drafts; a repeated suggestion ends the loop rather than spending a third adjustment on identical media.
 
 **Inspection branches on the probed database fact.** Video drafts run `silencedetect`, sample six chronological 512 px JPEGs, and send those frames plus opening word timings to `MODEL_VISION`. Audio drafts run silence and word-timing checks in code. `inspectClip` does not merely ask the model to ignore frames on audio: it never invokes the injected vision function, which the MP3 render test proves with a throwing spy. This is inspection, not video understanding, and events name the actual signals used.
 
@@ -135,7 +135,7 @@ Agents call `lib/tools/` and nothing else. No agent file imports the Supabase cl
 
 ## Phase 3 decisions
 
-**The plan is schema-valid first and campaign-valid second.** Zod checks the output shape. TypeScript checks relationships the schema cannot know: fixed per-type credit costs, total budget, enabled platforms, source segment membership, unique stable plan keys, the hard asset cap, and short-video duration. A relationship failure is sent back once with the exact violations. The prompt explains arithmetic, but only code is trusted to enforce it.
+**The plan is schema-valid first and campaign-valid second.** Zod checks the output shape. TypeScript checks relationships the schema cannot know: fixed per-type credit costs, total budget, enabled platforms, source segment membership, unique stable plan keys, the hard asset cap, and the aggregate bounded duration of all short videos. Written assets consume none of that allowance. A relationship failure is sent back once with the exact violations. The prompt explains arithmetic, but only code is trusted to enforce it.
 
 **A paid decision is graph memory.** Strategies are versioned rows. If the worker crashes after saving one but before leaving `strategize`, the node reuses it instead of paying to recreate it. The Director's successful structured output already lives in `agent_runs`; `getDirectorReview` treats that as the durable decision record, so a crash after review does not buy the same review twice. A Director or human rejection is the only reason the Strategist creates the next version.
 
@@ -211,7 +211,7 @@ Two bugs in it were found by exercising it rather than by reading it, both worth
 
 ## Phase 9 decisions
 
-**The final package is a code-enforced allowlist.** `lib/export.ts` selects assets whose status is exactly `passed`. Rejected, abandoned, replaced, planned, generating, revising, and needs-review rows are not export candidates. `finalize` validates that every selected row has content and that every clip has a durable local media path. The export route repeats the selection and validates media paths beneath `STORAGE_DIR`, then gives archiver file streams instead of reading clips into memory.
+**The final package is a code-enforced allowlist.** `lib/export.ts` selects assets whose status is exactly `passed`. Rejected, abandoned, replaced, planned, generating, revising, and needs-review rows are not export candidates. `finalize` validates that every selected row has content, every clip has a durable local media path and measured duration, and the sum of passed clip durations stays within the campaign-wide allowance. The export route repeats the selection, budget check, and media-path validation beneath `STORAGE_DIR`, then gives archiver file streams instead of reading clips into memory.
 
 **Review and export are separate concerns.** The final review page can show a campaign while it is awaiting final approval or recovering from failure. The ZIP endpoint returns a clear conflict until the `finalize` node has marked the campaign complete. This keeps a partially reviewed campaign from being mistaken for a shippable package.
 
