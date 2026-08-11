@@ -1,7 +1,7 @@
 import { generateText, Output } from 'ai';
 import type { z } from 'zod';
 import { modelFor, modelIdFor, type ModelRole } from '@/lib/llm/client';
-import { chargeCampaign, CostCeilingExceededError, extractCostUsd } from '@/lib/llm/budget';
+import { chargeCampaign, CostCeilingExceededError, resolveCostUsd } from '@/lib/llm/budget';
 import { db } from '@/lib/db/client';
 import { emit } from '@/lib/events';
 import type { Json } from '@/lib/db/database.types';
@@ -17,10 +17,14 @@ import type { Json } from '@/lib/db/database.types';
  * to `generateText`; the parsed value comes back on `result.output`. That choice
  * lives here and only here, so a future API shift is one file.
  *
- * The repair pass is not a nicety. OpenAI-compatible providers default
- * `supportsStructuredOutputs` to false, meaning the JSON schema is not enforced
- * server-side and the model is merely asked politely for JSON. When that is the
- * case, malformed output is the expected path, not the exceptional one.
+ * How much the repair pass matters depends on which provider served the call
+ * (see `lib/llm/client.ts`). Through OpenRouter, OpenAI-compatible providers
+ * default `supportsStructuredOutputs` to false: the schema is not enforced
+ * server-side, the model is merely asked politely for JSON, and malformed
+ * output is the expected path rather than the exceptional one. Called directly,
+ * Claude enforces the schema through `output_config.format` and the repair pass
+ * is a genuine safety net. It stays either way, because `MODEL_FAST` and
+ * `MODEL_OVERRIDE_ALL` still route through OpenRouter.
  */
 
 export interface StructuredCall<T> {
@@ -115,7 +119,7 @@ export async function callStructured<T>(call: StructuredCall<T>): Promise<Struct
       // Output.object validates, but parse again so the returned value is
       // definitely the schema's inferred type and not a structurally similar one.
       const value = call.schema.parse(result.output);
-      const costUsd = extractCostUsd(result.providerMetadata);
+      const costUsd = resolveCostUsd(model, result.providerMetadata);
 
       const info: AttemptInfo = { attempt, repaired, ok: true, costUsd };
       attempts.push(info);
@@ -168,7 +172,7 @@ export async function callStructured<T>(call: StructuredCall<T>): Promise<Struct
         repaired,
         ok: false,
         error: description,
-        costUsd: extractCostUsd(providerMetadataOf(error)),
+        costUsd: resolveCostUsd(model, providerMetadataOf(error)),
       };
       attempts.push(info);
       call.onAttempt?.(info);

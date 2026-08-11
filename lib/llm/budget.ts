@@ -1,6 +1,8 @@
 import { db } from '@/lib/db/client';
 import { env } from '@/lib/env';
 import { emit } from '@/lib/events';
+import { providerForModel } from '@/lib/llm/client';
+import { computeAnthropicCostUsd } from '@/lib/llm/pricing';
 
 /**
  * Real-money accounting. Distinct from campaign *credits*, which are a fictional
@@ -56,6 +58,23 @@ export function extractCostUsd(providerMetadata: unknown): number | null {
 }
 
 /**
+ * What a call cost, whichever provider served it.
+ *
+ * The two providers answer the question differently and neither answer
+ * generalises: OpenRouter returns real dollars on the response, Anthropic
+ * returns tokens that have to be priced locally. Routing on the model id keeps
+ * that split in one place, so `chargeCampaign` and the ceiling above it never
+ * learn which provider ran the call.
+ *
+ * A null means "unknown", which the caller records as a warning rather than $0.
+ */
+export function resolveCostUsd(modelId: string, providerMetadata: unknown): number | null {
+  return providerForModel(modelId) === 'anthropic'
+    ? computeAnthropicCostUsd(modelId, providerMetadata)
+    : extractCostUsd(providerMetadata);
+}
+
+/**
  * Charge a campaign and enforce the ceiling.
  *
  * The increment happens in Postgres (`add_campaign_cost`) so two concurrent calls
@@ -72,7 +91,7 @@ export async function chargeCampaign(
       agent: context.agent,
       node: context.node ?? null,
       level: 'warn',
-      message: `OpenRouter returned no cost for ${context.model ?? 'model call'}; campaign total is now an undercount.`,
+      message: `No cost could be determined for ${context.model ?? 'model call'}; campaign total is now an undercount.`,
     });
     return await currentSpend(campaignId);
   }

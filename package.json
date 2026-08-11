@@ -13,6 +13,7 @@
     "worker:once": "tsx worker/index.ts --once"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "4.0.37",
     "@openrouter/ai-sdk-provider": "3.0.0",
     "@supabase/supabase-js": "2.112.2",
     "@xyflow/react": "12.11.2",

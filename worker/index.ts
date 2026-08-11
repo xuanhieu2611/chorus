@@ -4,6 +4,7 @@ import { db, type CampaignRow } from '../lib/db/client';
 import { emit } from '../lib/events';
 import { env } from '../lib/env';
 import { assertBudget, CostCeilingExceededError } from '../lib/llm/budget';
+import { providerForModel } from '../lib/llm/client';
 import { runGraph } from '../lib/graph/run';
 import { CLAIMED_CAMPAIGN_STATUSES, ownsClaim } from '../lib/worker/recovery';
 
@@ -135,8 +136,13 @@ async function loop(): Promise<void> {
         'Unset it in .env.local for real output quality.',
     );
   } else {
+    // Naming the provider matters as much as the model: the id alone is the
+    // only thing that decides it, so a stray slash silently downgrades an agent
+    // from server-enforced schemas to the repair pass.
+    const describe = (id: string) => `${id} (${providerForModel(id)})`;
     console.log(
-      `[worker] models: reasoning=${env.modelReasoning} fast=${env.modelFast} vision=${env.modelVision}`,
+      `[worker] models: reasoning=${describe(env.modelReasoning)} ` +
+        `fast=${describe(env.modelFast)} vision=${describe(env.modelVision)}`,
     );
   }
 

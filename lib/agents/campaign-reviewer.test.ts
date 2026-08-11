@@ -79,12 +79,72 @@ test('Campaign Reviewer keeps an explicit REPLAN above the diversity floor', () 
   assert.equal(routing.forcedReplan, false);
 });
 
+const generousVideoBudget = { maxVideoSeconds: 180, remainingVideoSeconds: 180 };
+
 test('forced replans get a deterministic unused-segment replacement when the model omits one', () => {
-  const repaired = ensureReplanRecommendation(review(), assets, unusedSegments);
+  const repaired = ensureReplanRecommendation(review(), assets, unusedSegments, generousVideoBudget);
   assert.equal(repaired.decision, 'REPLAN');
   assert.deepEqual(repaired.recommendations.at(-1), {
     action: 'replace',
     plan_key: 'asset_1',
+    replacement_topic: 'A different argument',
+    replacement_segment_ids: ['unused-1'],
+  });
+});
+
+test('a replacement segment that would blow the video budget is dropped like a malformed one', () => {
+  const overBudget = review({
+    decision: 'REPLAN',
+    recommendations: [{
+      action: 'replace',
+      plan_key: 'asset_1',
+      replacement_topic: 'A different argument',
+      // unused-1 spans 20s (20-40); only 5s remain in the video budget.
+      replacement_segment_ids: ['unused-1'],
+    }],
+  });
+
+  // No unused segment fits 5 remaining seconds and asset_1 is the only passing
+  // asset, so the safety net has nothing legal to propose.
+  assert.throws(
+    () => ensureReplanRecommendation(overBudget, assets, unusedSegments, {
+      maxVideoSeconds: 180,
+      remainingVideoSeconds: 5,
+    }),
+    /no passing asset and unused segment are available/,
+  );
+});
+
+test('the fallback prefers a written asset over one that would blow the video budget', () => {
+  const mixedAssets: CampaignReviewAsset[] = [
+    { ...assets[0], planKey: 'video_asset' },
+    {
+      planKey: 'text_asset',
+      type: 'linkedin_post',
+      platform: 'linkedin',
+      hook: 'A strong hook',
+      content: { kind: 'linkedin_post' },
+      sourceSegmentIds: ['used-2'],
+      criticScores: { hook: 7 },
+      criticFeedback: 'Tighten the close.',
+    },
+  ];
+
+  const repaired = ensureReplanRecommendation(
+    review({
+      recommendations: [
+        { action: 'keep', plan_key: 'video_asset', replacement_topic: null, replacement_segment_ids: [] },
+        { action: 'keep', plan_key: 'text_asset', replacement_topic: null, replacement_segment_ids: [] },
+      ],
+    }),
+    mixedAssets,
+    unusedSegments,
+    { maxVideoSeconds: 180, remainingVideoSeconds: 5 },
+  );
+
+  assert.deepEqual(repaired.recommendations.at(-1), {
+    action: 'replace',
+    plan_key: 'text_asset',
     replacement_topic: 'A different argument',
     replacement_segment_ids: ['unused-1'],
   });

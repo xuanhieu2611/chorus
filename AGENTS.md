@@ -12,9 +12,11 @@ The product thesis is that the system exercises judgment rather than running a p
 
 `MVP.md` is the working document. Read it before touching anything: it fixes the stack with verified versions, the Postgres schema, the agent graph, per-agent contracts and Zod schemas, the FFmpeg pipeline, guardrails, and a 10-phase build plan where each phase ends in something runnable. Build in phase order and do not start a phase before the previous one visibly works.
 
-The structured-output spike (MVP section 7.0) has been run and retired; its findings, including two ceiling bugs it exposed, are recorded in `docs/ARCHITECTURE.md`. The short version: `Output.object` won, **strict schema mode is not in effect through OpenRouter**, so the repair pass in `lib/llm/structured.ts` is a live path rather than a safety net.
+The structured-output spike (MVP section 7.0) has been run and retired; its findings, including two ceiling bugs it exposed, are recorded in `docs/ARCHITECTURE.md`. The short version: `Output.object` won, and **strict schema mode is not in effect through OpenRouter**, which is what pushed the judgement roles onto the Anthropic API directly.
 
-**Development runs on a cheap model.** `MODEL_OVERRIDE_ALL` in `.env.local` points every agent role at one model (currently `google/gemini-2.5-flash-lite`, ~30x cheaper input than Sonnet 4.5), leaving `MODEL_REASONING`/`FAST`/`VISION` intact as the real configuration. Comment it out before judging output quality or recording the demo. Anything set there must accept images, or the Clip Producer's vision pass breaks on video sources.
+**Two providers, chosen by the model id.** An id with a slash is an OpenRouter route (`google/gemini-2.5-flash`); a bare id goes to the Anthropic API directly (`claude-sonnet-5`). `MODEL_REASONING` and `MODEL_VISION` run direct so Claude enforces the agent schemas server-side; `MODEL_FAST` stays on Gemini through OpenRouter for the million-token context the Source Analyst's map pass needs. Anthropic reports tokens rather than dollars, so `lib/llm/pricing.ts` prices the direct path against the ceiling. See `docs/ARCHITECTURE.md`.
+
+**Development runs on a cheap model.** `MODEL_OVERRIDE_ALL` in `.env.local` points every agent role at one model (currently `google/gemini-2.5-flash-lite`, ~20x cheaper input than Sonnet 5), leaving `MODEL_REASONING`/`FAST`/`VISION` intact as the real configuration. Comment it out before judging output quality or recording the demo. Anything set there must accept images, or the Clip Producer's vision pass breaks on video sources.
 
 ## Commands
 
@@ -37,6 +39,7 @@ node --import tsx --test lib/media/transcribe.test.ts   # a single test file
 npm run db:push        # apply supabase/migrations to the linked project
 npm run lint           # eslint
 
+npx tsx scripts/verify-provider.ts                       # one real call per role; proves keys and routing
 npx tsx scripts/inspect-transcript.ts <campaign-id>      # word timestamps, span, monotonicity
 npx tsx scripts/verify-chunking.ts <audio-file> [secs]   # chunked vs whole-file timeline; costs Groq time
 npx tsx scripts/verify-analysis.ts <campaign-id> [win] [overlap]  # forces the multi-window map-reduce; costs model calls

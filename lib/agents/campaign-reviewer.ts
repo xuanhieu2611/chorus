@@ -174,30 +174,63 @@ export function decideCampaignReview(review: CampaignReview): CampaignReviewRout
   };
 }
 
+export interface ReplanVideoBudget {
+  maxVideoSeconds: number;
+  /** Video-second allowance available to replacements, after kept video assets. */
+  remainingVideoSeconds: number;
+}
+
 /**
  * Keep a malformed or incomplete replacement proposal from silently turning a
  * forced REPLAN into an approval. Invalid replacement rows are discarded and a
  * deterministic first unused segment is paired with the first passing asset.
  * This is a routing safety net, not a substitute for the Reviewer's judgement.
+ *
+ * The Reviewer is never told the campaign-wide video-second budget (see
+ * `renderSegment`), so a `replace` recommendation targeting a short_video asset
+ * can name a segment that is individually fine but blows the aggregate budget
+ * once combined with every video the campaign is keeping. The Content
+ * Strategist that consumes this recommendation is not allowed to change its
+ * segment choice during a replan (`normalizeReplan` owns that field), so a
+ * budget-illegal segment reaches it as a dead end it cannot correct: the retry
+ * loop just resubmits the same over-budget plan and the whole campaign fails.
+ * Treating an over-budget segment choice the same as a malformed one - discard
+ * it here, before it ever reaches the Strategist - keeps that failure from
+ * happening at all.
  */
 export function ensureReplanRecommendation(
   review: CampaignReview,
   assets: CampaignReviewAsset[],
   unusedSegments: CampaignReviewSegment[],
+  videoBudget: ReplanVideoBudget,
 ): CampaignReview {
-  const assetKeys = new Set(assets.map((asset) => asset.planKey));
-  const unusedIds = new Set(unusedSegments.map((segment) => segment.id));
+  const assetByKey = new Map(assets.map((asset) => [asset.planKey, asset]));
+  const unusedByKey = new Map(unusedSegments.map((segment) => [segment.id, segment]));
   const usedReplacementIds = new Set<string>();
+  let videoSecondsLeft = videoBudget.remainingVideoSeconds;
+
   const recommendations = review.recommendations.filter((recommendation) => {
-    if (!assetKeys.has(recommendation.plan_key)) return false;
+    const target = assetByKey.get(recommendation.plan_key);
+    if (!target) return false;
     if (recommendation.action === 'keep') return true;
     if (!recommendation.replacement_topic || recommendation.replacement_segment_ids.length === 0) {
       return false;
     }
-    const valid = recommendation.replacement_segment_ids.every(
-      (segmentId) => unusedIds.has(segmentId) && !usedReplacementIds.has(segmentId),
+    const validIds = recommendation.replacement_segment_ids.every(
+      (segmentId) => unusedByKey.has(segmentId) && !usedReplacementIds.has(segmentId),
     );
-    if (!valid) return false;
+    if (!validIds) return false;
+
+    if (target.type === 'short_video') {
+      const duration = replacementVideoDuration(
+        recommendation.replacement_segment_ids,
+        unusedByKey,
+        videoBudget.maxVideoSeconds,
+      );
+      if (duration > videoSecondsLeft + 0.000001) return false;
+      videoSecondsLeft -= duration;
+    }
+
     for (const segmentId of recommendation.replacement_segment_ids) usedReplacementIds.add(segmentId);
     return true;
   });
@@ -206,10 +239,11 @@ export function ensureReplanRecommendation(
     return { ...review, decision: 'REPLAN', recommendations };
   }
 
-  const target = assets[0];
-  const segment = unusedSegments.find((candidate) => !usedReplacementIds.has(candidate.id));
-  if (!target || !segment) {
-    throw new Error('Campaign Reviewer forced a replan, but no passing asset and unused segment are available for replacement.');
+  const fallback = findFallbackReplacement(assets, unusedSegments, usedReplacementIds, videoBudget, videoSecondsLeft);
+  if (!fallback) {
+    throw new Error(
+      'Campaign Reviewer forced a replan, but no passing asset and unused segment are available for replacement within the video budget.',
+    );
   }
 
   return {
@@ -219,12 +253,52 @@ export function ensureReplanRecommendation(
       ...recommendations,
       {
         action: 'replace',
-        plan_key: target.planKey,
-        replacement_topic: segment.topic,
-        replacement_segment_ids: [segment.id],
+        plan_key: fallback.asset.planKey,
+        replacement_topic: fallback.segment.topic,
+        replacement_segment_ids: [fallback.segment.id],
       },
     ],
   };
+}
+
+function replacementVideoDuration(
+  segmentIds: readonly string[],
+  segmentsById: Map<string, CampaignReviewSegment>,
+  maxVideoSeconds: number,
+): number {
+  const total = segmentIds.reduce((sum, id) => {
+    const segment = segmentsById.get(id);
+    return sum + (segment ? segmentDuration(segment) : 0);
+  }, 0);
+  return Math.min(total, maxVideoSeconds);
+}
+
+function segmentDuration(segment: CampaignReviewSegment): number {
+  const duration = segment.endTime - segment.startTime;
+  return Number.isFinite(duration) && duration > 0 ? duration : 0;
+}
+
+/** First passing asset with an unused segment that actually fits its type's
+ * budget. Written assets consume no video allowance, so they are always
+ * eligible; a short_video asset only qualifies if some unused segment fits
+ * what remains after every recommendation already accepted above. */
+function findFallbackReplacement(
+  assets: CampaignReviewAsset[],
+  unusedSegments: CampaignReviewSegment[],
+  usedReplacementIds: Set<string>,
+  videoBudget: ReplanVideoBudget,
+  videoSecondsLeft: number,
+): { asset: CampaignReviewAsset; segment: CampaignReviewSegment } | null {
+  for (const asset of assets) {
+    const segment = unusedSegments.find((candidate) => {
+      if (usedReplacementIds.has(candidate.id)) return false;
+      if (asset.type !== 'short_video') return true;
+      const duration = Math.min(segmentDuration(candidate), videoBudget.maxVideoSeconds);
+      return duration <= videoSecondsLeft + 0.000001;
+    });
+    if (segment) return { asset, segment };
+  }
+  return null;
 }
 
 function renderAsset(asset: CampaignReviewAsset): string {

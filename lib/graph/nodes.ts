@@ -1134,7 +1134,21 @@ const campaignReview: NodeFn = async (ctx): Promise<NodeResult> => {
   const modelDecision = review.decision;
   const routing = decideCampaignReview(review);
   if (routing.decision === 'REPLAN') {
-    review = ensureReplanRecommendation(review, reviewAssets, reviewSegments);
+    const segments = await getSegments(campaignId);
+    const replacedPlanKeys = new Set(
+      review.recommendations.filter((r) => r.action === 'replace').map((r) => r.plan_key),
+    );
+    const keptPlannedAssets = passingPlans.filter((asset) => !replacedPlanKeys.has(asset.plan_key));
+    const remainingVideoSeconds = remainingVideoBudget({
+      maxVideoSeconds: campaign.max_video_seconds,
+      plannedAssets: keptPlannedAssets,
+      segments,
+      assets,
+    });
+    review = ensureReplanRecommendation(review, reviewAssets, reviewSegments, {
+      maxVideoSeconds: campaign.max_video_seconds,
+      remainingVideoSeconds,
+    });
   }
   const persisted = await recordCampaignReview(campaignId, strategy.version, review);
 
@@ -1229,6 +1243,7 @@ const replan: NodeFn = async (ctx): Promise<NodeResult> => {
     currentAssets.filter((asset) => asset.status === 'passed'),
   );
   const unusedSegments = await getUnusedSegments(campaignId);
+  const replanSegments = await getSegments(campaignId);
   const reviewRow = await getCampaignReview(campaignId, sourceStrategy.version);
   if (!reviewRow) {
     throw new Error(`No Campaign Reviewer result exists for strategy v${sourceStrategy.version}.`);
@@ -1236,14 +1251,24 @@ const replan: NodeFn = async (ctx): Promise<NodeResult> => {
   let review = parseCampaignReview(reviewRow);
   const humanFeedback = await getFinalApprovalFeedback(campaignId, sourceStrategy.version);
   if (humanFeedback) review = { ...review, decision: 'REPLAN' };
+  const replacedPlanKeys = new Set(
+    review.recommendations.filter((r) => r.action === 'replace').map((r) => r.plan_key),
+  );
+  const keptPlannedAssets = passingPlans.filter((asset) => !replacedPlanKeys.has(asset.plan_key));
+  const remainingVideoSeconds = remainingVideoBudget({
+    maxVideoSeconds: campaign.max_video_seconds,
+    plannedAssets: keptPlannedAssets,
+    segments: replanSegments,
+    assets: currentAssets,
+  });
   review = ensureReplanRecommendation(
     review,
     reviewAssets,
     unusedSegments.map(toCampaignReviewSegment),
+    { maxVideoSeconds: campaign.max_video_seconds, remainingVideoSeconds },
   );
 
   const targetVersion = sourceStrategy.version + 1;
-  const replanSegments = await getSegments(campaignId);
   const replanInput = {
     campaignId,
     previous: sourcePlan,

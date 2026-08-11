@@ -30,6 +30,11 @@ import { LinkedInOutputSchema, ThreadOutputSchema } from './writer';
  * it, so MODEL_OVERRIDE_ALL hides the whole class of failure. That is what this
  * test is for: the bounds these schemas used to carry now live in code, and
  * nothing but this test stops them being written back.
+ *
+ * The constraint set is Anthropic's, not OpenRouter's, so calling the Anthropic
+ * API directly does not relax it. It raises the stakes instead: the direct path
+ * enforces the schema server-side, so these keywords are now rejected on the
+ * roles that previously got away with a lenient provider.
  */
 const MODEL_FACING_SCHEMAS: ReadonlyArray<readonly [string, z.ZodType]> = [
   ['source-analyst MapSchema', MapSchema],
