@@ -1,5 +1,6 @@
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { groundingEvidenceLabel } from '@/lib/ui-grounding';
 
 export interface AssetView {
   id: string;
@@ -22,6 +23,12 @@ export interface AssetReviewView {
   asset_id: string;
   reviewer_agent: string;
   scores: unknown;
+  required_checks: unknown;
+  blocking_feedback: string | null;
+  polish_feedback: string | null;
+  grounding_audit: unknown;
+  grounding_audit_passed: boolean;
+  materially_contradicted: boolean;
   feedback: string;
   decision: 'PASS' | 'REVISE' | 'REJECT';
   revision_index: number;
@@ -50,6 +57,8 @@ export function AssetCard({
   const content = parseContent(asset.content);
   const latestReview = asset.reviews?.[asset.reviews.length - 1] ?? null;
   const scores = latestReview ? parseScores(latestReview.scores) : null;
+  const requiredChecks = latestReview ? parseRequiredChecks(latestReview.required_checks) : null;
+  const groundingAudit = latestReview ? parseGroundingAudit(latestReview.grounding_audit) : [];
   const sourceById = new Map(sources.map((source) => [source.id, source]));
   const selectedSources = asset.source_segment_ids.flatMap((id) => {
     const source = sourceById.get(id);
@@ -155,7 +164,32 @@ export function AssetCard({
                 </div>
               ))}
             </div>
-            <p className="text-muted-foreground mt-3 text-xs leading-5">{latestReview.feedback}</p>
+            {requiredChecks && (
+              <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
+                {Object.entries(requiredChecks).map(([key, passed]) => (
+                  <div key={key} className="bg-background/70 flex items-center justify-between rounded border px-2 py-1.5">
+                    <span className="text-muted-foreground">{key.replace(/_/g, ' ')}</span>
+                    <Badge variant={passed ? 'default' : 'destructive'}>{passed ? 'pass' : 'fix'}</Badge>
+                  </div>
+                ))}
+              </div>
+            )}
+            {latestReview.blocking_feedback ? (
+              <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-2.5">
+                <p className="text-[10px] font-semibold tracking-wide text-amber-700 uppercase dark:text-amber-400">
+                  Blocking feedback
+                </p>
+                <p className="text-muted-foreground mt-1 text-xs leading-5">{latestReview.blocking_feedback}</p>
+              </div>
+            ) : null}
+            {latestReview.polish_feedback ? (
+              <div className="mt-3 rounded-md border border-sky-500/25 bg-sky-500/5 p-2.5">
+                <p className="text-[10px] font-semibold tracking-wide text-sky-700 uppercase dark:text-sky-400">
+                  Optional polish
+                </p>
+                <p className="text-muted-foreground mt-1 text-xs leading-5">{latestReview.polish_feedback}</p>
+              </div>
+            ) : null}
             {asset.revision_count > 0 && (
               <p className="text-muted-foreground mt-2 font-mono text-[10px]">
                 revision {asset.revision_count}
@@ -173,8 +207,7 @@ export function AssetCard({
         {content && content.grounding.length > 0 && (
           <details className="group rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-3">
             <summary className="cursor-pointer text-xs font-medium text-emerald-700 dark:text-emerald-400">
-              {content.grounding.length} verified source quote
-              {content.grounding.length === 1 ? '' : 's'}
+              {groundingEvidenceLabel(content.grounding.length, latestReview)}
             </summary>
             <div className="mt-3 flex flex-col gap-3">
               {content.grounding.map((item, index) => (
@@ -183,6 +216,28 @@ export function AssetCard({
                   <blockquote className="text-muted-foreground mt-1 border-l pl-2 italic">
                     “{item.source_quote}”
                   </blockquote>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+
+        {latestReview && groundingAudit.length > 0 && (
+          <details className="group rounded-lg border border-violet-500/25 bg-violet-500/5 p-3">
+            <summary className="cursor-pointer text-xs font-medium text-violet-700 dark:text-violet-400">
+              Semantic grounding audit: {latestReview.grounding_audit_passed ? 'passed' : 'needs revision'}
+            </summary>
+            <div className="mt-3 flex flex-col gap-3">
+              {groundingAudit.map((item, index) => (
+                <div key={`${item.claim}-${index}`} className="text-xs">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-medium">{item.claim}</p>
+                    <Badge variant={item.supported ? 'default' : 'destructive'}>
+                      {item.supported ? 'supported' : 'unsupported'}
+                    </Badge>
+                    {item.overstates_source && <Badge variant="destructive">overstates source</Badge>}
+                  </div>
+                  <p className="text-muted-foreground mt-1 leading-5">{item.reason}</p>
                 </div>
               ))}
             </div>
@@ -279,6 +334,53 @@ interface CriticScoresView {
   originality: number;
   audience_fit: number;
   payoff: number;
+}
+
+interface RequiredChecksView {
+  brief_compliant: boolean;
+  source_supported: boolean;
+  standalone: boolean;
+  payoff_delivered: boolean;
+}
+
+interface GroundingAuditView {
+  claim: string;
+  supported: boolean;
+  overstates_source: boolean;
+  reason: string;
+}
+
+function parseRequiredChecks(value: unknown): RequiredChecksView | null {
+  if (!isRecord(value)) return null;
+  const keys: Array<keyof RequiredChecksView> = [
+    'brief_compliant',
+    'source_supported',
+    'standalone',
+    'payoff_delivered',
+  ];
+  if (!keys.every((key) => typeof value[key] === 'boolean')) return null;
+  return value as unknown as RequiredChecksView;
+}
+
+function parseGroundingAudit(value: unknown): GroundingAuditView[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (
+      isRecord(item) &&
+      typeof item.claim === 'string' &&
+      typeof item.supported === 'boolean' &&
+      typeof item.overstates_source === 'boolean' &&
+      typeof item.reason === 'string'
+    ) {
+      return [{
+        claim: item.claim,
+        supported: item.supported,
+        overstates_source: item.overstates_source,
+        reason: item.reason,
+      }];
+    }
+    return [];
+  });
 }
 
 function parseScores(value: unknown): CriticScoresView | null {

@@ -15,6 +15,7 @@ export interface PlannedAssetView {
 export interface RejectedTopicView {
   topic: string;
   reason: string;
+  segment_ids?: string[];
 }
 
 export interface StrategyView {
@@ -90,6 +91,11 @@ export function StrategyPanel({
                 <div key={`${item.topic}-${index}`} className="rounded-lg border border-rose-500/20 p-3">
                   <p className="text-sm font-medium">{item.topic}</p>
                   <p className="text-muted-foreground mt-1.5 text-xs">{item.reason}</p>
+                  {item.segment_ids && item.segment_ids.length > 0 && (
+                    <p className="text-muted-foreground mt-2 font-mono text-[10px]">
+                      Source segments: {item.segment_ids.join(', ')}
+                    </p>
+                  )}
                 </div>
               )) : (
                 <p className="text-muted-foreground rounded-lg border border-dashed p-3 text-sm">

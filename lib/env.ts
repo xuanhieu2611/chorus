@@ -27,6 +27,14 @@ function positiveNum(name: string, fallback: number): number {
   return value;
 }
 
+function nonNegativeInt(name: string, fallback: number): number {
+  const value = num(name, fallback);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`Env var ${name} must be a non-negative integer, got "${value}".`);
+  }
+  return value;
+}
+
 const MVP_MAX_ASSETS = 6;
 
 export const env = {
@@ -99,8 +107,11 @@ export const env = {
   get maxRevisionsPerAsset() {
     return num('MAX_REVISIONS_PER_ASSET', 3);
   },
-  get maxCampaignReplans() {
-    return num('MAX_CAMPAIGN_REPLANS', 2);
+  get maxPlanRevisions() {
+    return nonNegativeInt('MAX_PLAN_REVISIONS', 2);
+  },
+  get maxPortfolioReplans() {
+    return nonNegativeInt('MAX_PORTFOLIO_REPLANS', 2);
   },
   /**
    * The user-facing and graph-level cap. MVP never allows more than six

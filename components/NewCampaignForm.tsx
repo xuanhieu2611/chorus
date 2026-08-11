@@ -33,6 +33,7 @@ export function NewCampaignForm({ maxAssets }: { maxAssets: number }) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [percent, setPercent] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
 
   const busy = phase !== 'idle';
 
@@ -86,21 +87,27 @@ export function NewCampaignForm({ maxAssets }: { maxAssets: number }) {
   }
 
   return (
-    <form onSubmit={onSubmit} className="flex flex-col gap-6">
+    <form onSubmit={onSubmit} className="flex flex-col gap-5">
       <div className="flex flex-col gap-2">
-        <Label htmlFor="file">Podcast episode</Label>
+        <Label htmlFor="file">Source episode</Label>
+        <label htmlFor="file" className="upload-dropzone">
+          <span className="upload-dropzone__mark" aria-hidden>+</span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium">{fileName ?? 'Choose a video or audio file'}</span>
+            <span className="text-muted-foreground mt-1 block text-[10px]">MP4, MOV, MP3, WAV and more</span>
+          </span>
+          <span className="upload-dropzone__action">Browse</span>
+        </label>
         <Input
           id="file"
           name="file"
           type="file"
           ref={fileRef}
           disabled={busy}
+          className="sr-only"
+          onChange={(event) => setFileName(event.target.files?.[0]?.name ?? null)}
           accept=".mp4,.mov,.m4v,.mkv,.webm,.mp3,.m4a,.wav,.aac,.flac,.ogg"
         />
-        <p className="text-muted-foreground text-xs">
-          Video or audio. An audio-only source still produces postable clips, as caption cards
-          rather than talking-head crops.
-        </p>
       </div>
 
       <div className="flex flex-col gap-2">
@@ -112,14 +119,12 @@ export function NewCampaignForm({ maxAssets }: { maxAssets: number }) {
           disabled={busy}
           placeholder="Grow a developer audience on TikTok and LinkedIn by showing that we understand the day-to-day problems of shipping AI features."
         />
-        <p className="text-muted-foreground text-xs">
-          Every agent optimizes against this sentence, so be specific about who and what for.
-        </p>
       </div>
 
-      <details className="group border-border rounded-lg border px-4 py-3">
-        <summary className="cursor-pointer text-sm font-medium select-none">
-          Campaign settings
+      <details className="group border-border rounded-lg border px-4 py-3.5">
+        <summary className="flex cursor-pointer list-none items-center justify-between text-xs font-medium select-none [&::-webkit-details-marker]:hidden">
+          <span>Audience, voice and limits</span>
+          <span className="text-muted-foreground text-base font-light transition-transform group-open:rotate-45">+</span>
         </summary>
 
         <div className="mt-4 flex flex-col gap-4">
@@ -155,7 +160,7 @@ export function NewCampaignForm({ maxAssets }: { maxAssets: number }) {
             </div>
           </fieldset>
 
-          <div className="flex gap-4">
+          <div className="grid gap-4 sm:grid-cols-2">
             <div className="flex flex-1 flex-col gap-2">
               <Label htmlFor="max_assets">Max assets</Label>
               <Input
@@ -210,14 +215,14 @@ export function NewCampaignForm({ maxAssets }: { maxAssets: number }) {
         </div>
       )}
 
-      <Button type="submit" disabled={busy || !hydrated} aria-busy={!hydrated || busy} size="lg">
+      <Button type="submit" disabled={busy || !hydrated} aria-busy={!hydrated || busy} size="lg" className="h-11 w-full text-sm">
         {!hydrated
           ? 'Loading form…'
           : phase === 'uploading'
             ? 'Uploading…'
             : phase === 'creating'
               ? 'Queueing…'
-              : 'Build Campaign'}
+              : 'Build campaign'}
       </Button>
     </form>
   );

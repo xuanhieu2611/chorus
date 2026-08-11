@@ -5,7 +5,11 @@ async function main() {
   loadEnv();
   const campaignId = '922719a4-f125-4355-9625-90d8042f4039';
 
-  const { data: campaign } = await db().from('campaigns').select('status, current_node, error, replan_count, cost_usd').eq('id', campaignId).single();
+  const { data: campaign } = await db()
+    .from('campaigns')
+    .select('status, current_node, error, plan_revision_count, portfolio_replan_count, cost_usd')
+    .eq('id', campaignId)
+    .single();
   console.log(campaign);
 
   const { data: events } = await db()

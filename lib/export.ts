@@ -139,6 +139,8 @@ function renderCampaignMarkdown(
     campaign.brand_voice ? `- Brand voice: ${campaign.brand_voice}` : null,
     `- Source duration: ${campaign.source_duration_sec === null ? 'unknown' : `${Number(campaign.source_duration_sec).toFixed(1)}s`}`,
     `- Media: ${campaign.has_video_stream === false ? 'audio-only caption cards' : campaign.has_video_stream === true ? 'video + audio' : 'unknown'}`,
+    `- Completion mode: ${campaign.completion_mode ?? 'not recorded'}`,
+    campaign.completion_note ? `- Completion rationale: ${campaign.completion_note}` : null,
     '',
     '## Included assets',
     '',
@@ -147,8 +149,17 @@ function renderCampaignMarkdown(
 
   if (review && scores) {
     lines.push('', `## Campaign Reviewer scorecard (strategy v${review.version})`, '');
+    lines.push(`- Model decision: ${review.model_decision ?? review.decision}`);
+    lines.push(`- Effective decision: ${review.effective_decision ?? review.decision}`);
     for (const [key, value] of Object.entries(scores)) {
       if (typeof value === 'number') lines.push(`- ${key.replace(/_/g, ' ')}: ${value.toFixed(1)}`);
+    }
+    const problems = reviewProblems(review.problems);
+    lines.push('', '### Unresolved reviewer problems', '');
+    if (problems.length === 0) {
+      lines.push('- None recorded.');
+    } else {
+      lines.push(...problems.map((problem) => `- ${problem.issue}${problem.asset_plan_keys.length > 0 ? ` (${problem.asset_plan_keys.join(', ')})` : ''}`));
     }
   }
 
@@ -172,6 +183,21 @@ function groundingFrom(value: unknown): Array<{ claim: string; source_quote: str
     const record = recordOf(item);
     return typeof record?.claim === 'string' && typeof record.source_quote === 'string'
       ? [{ claim: record.claim, source_quote: record.source_quote }]
+      : [];
+  });
+}
+
+function reviewProblems(value: unknown): Array<{ issue: string; asset_plan_keys: string[] }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const record = recordOf(item);
+    return typeof record?.issue === 'string'
+      ? [{
+          issue: record.issue,
+          asset_plan_keys: Array.isArray(record.asset_plan_keys)
+            ? record.asset_plan_keys.filter((key): key is string => typeof key === 'string')
+            : [],
+        }]
       : [];
   });
 }

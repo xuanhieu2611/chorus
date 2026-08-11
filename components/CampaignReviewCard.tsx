@@ -5,6 +5,8 @@ export interface CampaignReviewView {
   id: string;
   version: number;
   decision: 'APPROVE' | 'REPLAN';
+  model_decision: 'APPROVE' | 'REPLAN';
+  effective_decision: 'APPROVE' | 'REPLAN';
   scores: {
     asset_quality: number;
     diversity: number;
@@ -18,6 +20,8 @@ export interface CampaignReviewView {
     plan_key: string;
     replacement_topic: string | null;
     replacement_segment_ids: string[];
+    replacement_reason: string | null;
+    prior_rejection_addressed: string | null;
   }>;
 }
 
@@ -27,9 +31,12 @@ export function CampaignReviewCard({ review }: { review: CampaignReviewView }) {
       <CardHeader className="gap-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="text-base">Campaign Reviewer scorecard</CardTitle>
-          <Badge variant={review.decision === 'APPROVE' ? 'default' : 'destructive'}>
-            {review.decision}
-          </Badge>
+          <div className="flex flex-wrap items-center gap-2">
+          <Badge variant={review.effective_decision === 'APPROVE' ? 'default' : 'destructive'}>
+              Effective: {review.effective_decision}
+            </Badge>
+            <Badge variant="outline">Model: {review.model_decision}</Badge>
+          </div>
         </div>
         <p className="text-muted-foreground text-xs">Portfolio review for strategy v{review.version}</p>
       </CardHeader>
@@ -75,10 +82,22 @@ export function CampaignReviewCard({ review }: { review: CampaignReviewView }) {
                   <span className="font-mono text-xs">{recommendation.plan_key}</span>
                 </div>
                 {recommendation.action === 'replace' && (
-                  <p className="text-muted-foreground mt-2 text-xs">
-                    Replace with “{recommendation.replacement_topic}” from{' '}
-                    <span className="font-mono">{recommendation.replacement_segment_ids.join(', ')}</span>.
-                  </p>
+                  <>
+                    <p className="text-muted-foreground mt-2 text-xs">
+                      Replace with “{recommendation.replacement_topic}” from{' '}
+                      <span className="font-mono">{recommendation.replacement_segment_ids.join(', ')}</span>.
+                    </p>
+                    {recommendation.replacement_reason && (
+                      <p className="text-muted-foreground mt-1 text-xs">
+                        Why: {recommendation.replacement_reason}
+                      </p>
+                    )}
+                    {recommendation.prior_rejection_addressed && (
+                      <p className="text-amber-700 mt-1 text-xs dark:text-amber-300">
+                        Prior rejection addressed: {recommendation.prior_rejection_addressed}
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
             ))}

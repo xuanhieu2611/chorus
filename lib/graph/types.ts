@@ -1,4 +1,5 @@
 import type { CampaignPatch, CampaignRow } from '@/lib/db/client';
+import type { Json } from '@/lib/db/database.types';
 
 /**
  * The node contract. Every node in the graph has this exact shape, which is what
@@ -51,6 +52,8 @@ export interface NodeResult {
   /** `null` pauses the run: a human gate, or a terminal state. */
   next: NodeId | null;
   patch?: CampaignPatch;
+  /** Extra durable decision metadata for graph history and migration backfills. */
+  data?: { [key: string]: Json | undefined };
   /** Written to `agent_events` at `level:'decision'`. This is the sentence a
    * person reads in the timeline to understand why the run went where it did,
    * so write it for them, not for a log file. */

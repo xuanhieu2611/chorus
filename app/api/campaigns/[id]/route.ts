@@ -1,4 +1,5 @@
 import { db } from '@/lib/db/client';
+import { env } from '@/lib/env';
 import { readEventsSince } from '@/lib/events';
 
 /**
@@ -73,12 +74,12 @@ export async function GET(
       .order('created_at', { ascending: true }),
     db()
       .from('reviews')
-      .select('id, asset_id, campaign_id, reviewer_agent, scores, feedback, decision, revision_index, created_at')
+      .select('id, asset_id, campaign_id, reviewer_agent, scores, required_checks, grounding_audit, grounding_audit_passed, blocking_feedback, polish_feedback, materially_contradicted, feedback, decision, revision_index, created_at')
       .eq('campaign_id', id)
       .order('created_at', { ascending: true }),
     db()
       .from('campaign_reviews')
-      .select('id, campaign_id, version, scores, problems, recommendations, decision, created_at')
+      .select('id, campaign_id, version, scores, problems, recommendations, decision, model_decision, effective_decision, created_at')
       .eq('campaign_id', id)
       .order('version', { ascending: false })
       .limit(1)
@@ -99,7 +100,7 @@ export async function GET(
   const segments = segmentsResult.data;
 
   return Response.json({
-    campaign,
+    campaign: { ...campaign, portfolio_replan_limit: env.maxPortfolioReplans },
     transcript: transcript
       ? {
           language: transcript.language,

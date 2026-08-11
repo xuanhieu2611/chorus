@@ -48,6 +48,24 @@ test('grounding rejects a paraphrase even when it preserves the source meaning',
   assert.match(failures[0], /does not appear/);
 });
 
+test('lexical grounding accepts an exact quote while the Critic semantic audit owns overstatement', () => {
+  const asset: WrittenAsset = {
+    hook: 'Five customers prove product-market fit.',
+    content: {
+      kind: 'linkedin_post',
+      body: 'Talking to five customers proves product-market fit.',
+    },
+    grounding: [
+      {
+        claim: 'Talking to five customers proves product-market fit.',
+        source_quote: 'You should talk to five customers before writing code.',
+      },
+    ],
+  };
+
+  assert.deepEqual(validateGrounding(asset, 'linkedin_post', sources), []);
+});
+
 test('grounding rejects content for the wrong planned platform', () => {
   const asset: WrittenAsset = {
     hook: 'A thread hook',

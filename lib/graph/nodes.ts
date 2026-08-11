@@ -1,17 +1,32 @@
 import { mkdir, stat } from 'node:fs/promises';
-import type { AssetRow, SegmentRow } from '@/lib/db/client';
+import type { AssetRow, CampaignRow, SegmentRow } from '@/lib/db/client';
 import type { Json } from '@/lib/db/database.types';
 import {
   CampaignReviewSchema,
   decideCampaignReview,
+  exactHistoryConflicts,
   ensureReplanRecommendation,
+  normalizeCampaignReview,
   reviewCampaign,
   type CampaignReview,
   type CampaignReviewAsset,
+  type CampaignReviewStrategyContext,
   type CampaignReviewSegment,
 } from '@/lib/agents/campaign-reviewer';
-import { CriticSchema, critiqueAsset, decideCritic, type CriticReview } from '@/lib/agents/critic';
-import { reviewStrategy } from '@/lib/agents/director';
+import {
+  CriticSchema,
+  critiqueAsset,
+  criticRevisionOutcome,
+  decideCritic,
+  enforceGroundingAudit,
+  extractGroundingClaims,
+  type CriticReview,
+} from '@/lib/agents/critic';
+import {
+  makeDirectorRuntimeConstraints,
+  reviewStrategy,
+  validateDirectorChanges,
+} from '@/lib/agents/director';
 import { analyzeSource } from '@/lib/agents/source-analyst';
 import {
   CREDIT_COST,
@@ -52,6 +67,7 @@ import {
   abandonAsset,
   beginAssetGeneration,
   beginAssetRevision,
+  chargeCampaignTransition,
   countSegments,
   ensurePlannedAssets,
   getAlternativeRun,
@@ -62,6 +78,8 @@ import {
   getDirectorReview,
   getLatestReview,
   getFinalApprovalFeedback,
+  getFinalApprovalProvenance,
+  getLatestCampaignReview,
   getReplanRun,
   getLatestStrategy,
   getRevisionRequest,
@@ -85,6 +103,11 @@ import {
   saveWrittenAsset,
 } from '@/lib/tools';
 import type { NodeFn, NodeId, NodeResult } from '@/lib/graph/types';
+import {
+  counterForTransition,
+  transitionBudgetExhausted,
+  transitionBudgetWarning,
+} from '@/lib/transition-budget';
 
 /**
  * One function per node. Control flow lives here; the executor in
@@ -300,6 +323,16 @@ const analyze: NodeFn = async (ctx): Promise<NodeResult> => {
         message: `Window ${index + 1} could not be analyzed and was skipped: ${error}`,
       });
     },
+    onWarning: (warning) => {
+      void emit({
+        campaignId,
+        agent: 'source_analyst',
+        node: 'analyze',
+        level: 'warn',
+        message: warning.message,
+        data: warning.data,
+      });
+    },
   });
 
   const saved = await saveSegments(campaignId, result.segments);
@@ -398,17 +431,42 @@ const directorReviewPlan: NodeFn = async (ctx): Promise<NodeResult> => {
   if (!strategy) throw new Error('Director review reached without a saved strategy.');
 
   const plan = planFromStrategy(strategy);
+  const segments = await getSegments(campaignId);
+  const runtimeConstraints = makeDirectorRuntimeConstraints({
+    platforms: campaign.platforms,
+    maxAssets: Math.min(campaign.max_assets, env.maxAssets),
+    creditBudget: planningCreditBudget(campaign.credit_budget),
+    maxVideoSeconds: campaign.max_video_seconds,
+  });
+  const planViolations = validateStrategy(plan, segments, {
+    creditBudget: runtimeConstraints.creditBudget,
+    maxAssets: runtimeConstraints.maxAssets,
+    maxVideoSeconds: runtimeConstraints.maxVideoSeconds,
+    platforms: runtimeConstraints.enabledPlatforms,
+  });
+  if (planViolations.length > 0) {
+    throw new Error(
+      `Director received a strategy that failed runtime validation: ${planViolations.join('; ')}`,
+    );
+  }
+
   const prior = await getDirectorReview(campaignId, strategy);
+  const priorViolations = prior
+    ? validateDirectorChanges(prior.review.required_changes, plan, runtimeConstraints)
+    : [];
   const review =
-    prior?.review ??
-    (await reviewStrategy({
-      campaignId,
-      strategyVersion: strategy.version,
-      strategy: plan,
-      goal: campaign.goal,
-      audience: campaign.audience,
-      brandVoice: campaign.brand_voice,
-    }));
+    prior && priorViolations.length === 0
+      ? prior.review
+      : await reviewStrategy({
+          campaignId,
+          strategyVersion: strategy.version,
+          strategy: plan,
+          goal: campaign.goal,
+          audience: campaign.audience,
+          brandVoice: campaign.brand_voice,
+          runtimeConstraints,
+          previousViolations: priorViolations,
+        });
 
   if (review.decision === 'APPROVE') {
     await markStrategyApproved(strategy.id, 'director');
@@ -418,36 +476,84 @@ const directorReviewPlan: NodeFn = async (ctx): Promise<NodeResult> => {
     };
   }
 
-  // Version N exists after N-1 replans. If replan_count already reaches this
-  // version, this exact rejection was counted before a crash and only its edge
-  // remains to be traversed. Otherwise consume one replan if one is available.
-  if (campaign.replan_count >= strategy.version) {
+  const transitionKind = 'director_replan' as const;
+  const counters = transitionCounters(campaign);
+  if (
+    transitionBudgetExhausted(counters, transitionKind, {
+      maxPlanRevisions: env.maxPlanRevisions,
+      maxPortfolioReplans: env.maxPortfolioReplans,
+    })
+  ) {
+    const warning = transitionBudgetWarning(transitionKind, counters, {
+      maxPlanRevisions: env.maxPlanRevisions,
+      maxPortfolioReplans: env.maxPortfolioReplans,
+    });
+    await emit({
+      campaignId,
+      agent: 'content_director',
+      node: 'director_review_plan',
+      level: 'warn',
+      message: `Director rejected strategy v${strategy.version}; ${warning}`,
+      data: {
+        strategy_version: strategy.version,
+        required_changes: review.required_changes,
+        budget: counterForTransition(transitionKind),
+        count: counters.plan_revision_count,
+        limit: env.maxPlanRevisions,
+      },
+    });
     return {
-      next: 'strategize',
-      reason: `Resuming the Director's rejection of strategy v${strategy.version}: ${review.required_changes.join(' ')}`,
+      next: 'await_strategy_approval',
+      reason: `Director rejected strategy v${strategy.version}, but the plan-revision budget is exhausted. The rejected review is waiting at the strategy gate for an explicit human decision.`,
+      data: {
+        strategy_version: strategy.version,
+        transition_kind: transitionKind,
+        budget_exhausted: true,
+        queued_node: 'await_strategy_approval',
+      },
     };
   }
 
-  if (campaign.replan_count < env.maxCampaignReplans) {
-    const nextCount = campaign.replan_count + 1;
-    return {
-      next: 'strategize',
-      patch: { replan_count: nextCount },
-      reason: `Director rejected strategy v${strategy.version} and requested replan ${nextCount} of ${env.maxCampaignReplans}: ${review.required_changes.join(' ')}`,
-    };
-  }
-
-  await emit({
+  const charge = await chargeCampaignTransition({
     campaignId,
-    agent: 'content_director',
-    node: 'director_review_plan',
-    level: 'warn',
-    message: `Director rejected strategy v${strategy.version}, but the campaign has used all ${env.maxCampaignReplans} replans.`,
-    data: { required_changes: review.required_changes },
+    strategyVersion: strategy.version,
+    transitionKind,
+    maxCount: env.maxPlanRevisions,
   });
+  if (charge.budgetExhausted) {
+    const reason = `Director rejected strategy v${strategy.version}, but the plan-revision budget is exhausted (${charge.planRevisionCount}/${env.maxPlanRevisions}). The rejected review is waiting at the strategy gate for an explicit human decision.`;
+    await emit({
+      campaignId,
+      agent: 'content_director',
+      node: 'director_review_plan',
+      level: 'warn',
+      message: reason,
+      data: { strategy_version: strategy.version, required_changes: review.required_changes },
+    });
+    return {
+      next: 'await_strategy_approval',
+      reason,
+      data: {
+        strategy_version: strategy.version,
+        transition_kind: transitionKind,
+        budget_exhausted: true,
+        queued_node: 'await_strategy_approval',
+      },
+    };
+  }
+  const count = charge.planRevisionCount;
   return {
-    next: 'finalize',
-    reason: `Director rejected strategy v${strategy.version}, and no replans remain. The campaign will finalize without producing this rejected plan.`,
+    next: 'strategize',
+    reason: charge.charged
+      ? `Director rejected strategy v${strategy.version} and queued plan revision ${count} of ${env.maxPlanRevisions}: ${renderDirectorChanges(review.required_changes)}`
+      : `Resuming the Director's rejection of strategy v${strategy.version}; plan revision ${count} of ${env.maxPlanRevisions} was already charged before a worker retry: ${renderDirectorChanges(review.required_changes)}`,
+    data: {
+      strategy_version: strategy.version,
+      transition_kind: transitionKind,
+      transition_charged: charge.charged,
+      queued_node: 'strategize',
+      plan_revision_count: count,
+    },
   };
 };
 
@@ -583,7 +689,7 @@ const produce: NodeFn = async (ctx): Promise<NodeResult> => {
   }
 
   const previousReview = isRevision ? await getLatestReview(asset.id) : null;
-  const revisionFeedback = previousReview?.feedback ?? null;
+  const revisionFeedback = previousReview?.blocking_feedback ?? null;
   const creditsLeft = isRevision
     ? await beginAssetRevision(asset.id)
     : await beginAssetGeneration(asset.id, planned.credits);
@@ -625,7 +731,7 @@ const produce: NodeFn = async (ctx): Promise<NodeResult> => {
       agent: 'writing_agent',
       node: 'produce',
       level: 'tool',
-      message: `${planned.plan_key}: saved ${isRevision ? 'revised ' : ''}${labelForWrittenType(planned.type)} with ${output.grounding.length} verified source quote${output.grounding.length === 1 ? '' : 's'}.`,
+      message: `${planned.plan_key}: saved ${isRevision ? 'revised ' : ''}${labelForWrittenType(planned.type)} with ${output.grounding.length} exact source quote${output.grounding.length === 1 ? '' : 's'}.`,
       data: {
         asset_id: saved.id,
         plan_key: planned.plan_key,
@@ -711,6 +817,7 @@ const critique: NodeFn = async (ctx): Promise<NodeResult> => {
   const segments = await getSegments(campaignId);
   const segmentById = new Map(segments.map((segment) => [segment.id, segment]));
   const sources = sourceInputsForIds(asset.source_segment_ids, segmentById, asset.plan_key);
+  const grounding = extractGroundingClaims(asset.content);
   const revisionIndex = asset.revision_count;
 
   let review: CriticReview | null = null;
@@ -718,7 +825,11 @@ const critique: NodeFn = async (ctx): Promise<NodeResult> => {
   if (savedReview?.revision_index === revisionIndex) {
     const parsed = CriticSchema.safeParse({
       scores: savedReview.scores,
-      feedback: savedReview.feedback,
+      required_checks: savedReview.required_checks,
+      grounding_audit: savedReview.grounding_audit,
+      blocking_feedback: savedReview.blocking_feedback,
+      polish_feedback: savedReview.polish_feedback,
+      materially_contradicted: savedReview.materially_contradicted,
     });
     if (parsed.success) review = parsed.data;
   }
@@ -735,6 +846,7 @@ const critique: NodeFn = async (ctx): Promise<NodeResult> => {
         platform: asset.platform as 'tiktok' | 'x' | 'linkedin',
         hook: asset.hook,
         content: asset.content,
+        grounding,
         sources,
         inspection: inspectionFromContent(asset.content),
         revisionIndex,
@@ -744,11 +856,22 @@ const critique: NodeFn = async (ctx): Promise<NodeResult> => {
       }));
   }
 
-  const routing = decideCritic(review.scores);
+  const enforced = enforceGroundingAudit(review, grounding);
+  review = enforced.review;
+  const routing = decideCritic(review, grounding);
+  const blockingFeedback =
+    routing.decision === 'REVISE'
+      ? blockingFeedbackForRevision(review, routing)
+      : review.blocking_feedback;
   const persisted = await recordReview(asset.id, {
     campaignId,
     scores: review.scores,
-    feedback: review.feedback,
+    requiredChecks: review.required_checks,
+    blockingFeedback,
+    polishFeedback: review.polish_feedback,
+    groundingAudit: review.grounding_audit,
+    groundingAuditPassed: routing.groundingAuditPassed,
+    materiallyContradicted: review.materially_contradicted,
     decision: routing.decision,
     revisionIndex,
   });
@@ -758,11 +881,19 @@ const critique: NodeFn = async (ctx): Promise<NodeResult> => {
     agent: 'content_critic',
     node: 'critique',
     level: 'info',
-    message: `${asset.plan_key}: Critic ${routing.decision} at ${routing.average.toFixed(2)} average (lowest ${routing.lowest.toFixed(2)}).`,
+    message: `${asset.plan_key}: Critic ${routing.decision} at ${routing.average.toFixed(2)} average (lowest ${routing.lowest.toFixed(2)}); ${renderCriticChecks(routing)}${review.polish_feedback ? ' Optional polish noted.' : ''}`,
     data: {
       asset_id: asset.id,
       decision: routing.decision,
       scores: review.scores,
+      required_checks: review.required_checks,
+      failed_checks: routing.failedChecks,
+      materially_contradicted: routing.materiallyContradicted,
+      grounding_audit: review.grounding_audit,
+      grounding_audit_passed: routing.groundingAuditPassed,
+      grounding_audit_failures: routing.groundingAuditFailures,
+      blocking_feedback: blockingFeedback,
+      polish_feedback: review.polish_feedback,
       average: routing.average,
       lowest: routing.lowest,
       revision_index: persisted.revision_index,
@@ -773,7 +904,7 @@ const critique: NodeFn = async (ctx): Promise<NodeResult> => {
     await markAssetPassed(asset.id);
     return {
       next: 'produce',
-      reason: `Critic PASS for ${asset.plan_key}: ${routing.average.toFixed(2)} average with no score below 5. Moving to the next asset.`,
+      reason: `Critic PASS for ${asset.plan_key}: ${routing.average.toFixed(2)} average, no score below 5, all required checks passed, and no blocking feedback. Moving to the next asset.`,
     };
   }
 
@@ -801,11 +932,11 @@ const critique: NodeFn = async (ctx): Promise<NodeResult> => {
       };
     }
 
-    if (asset.revision_count < env.maxRevisionsPerAsset) {
+    if (criticRevisionOutcome(routing.decision, asset.revision_count, env.maxRevisionsPerAsset) === 'REVISE') {
       const revised = await prepareAssetRevision(asset.id, asset.revision_count);
       return {
         next: 'produce',
-        reason: `Critic REVISE for ${asset.plan_key}: ${review.feedback} Revision ${revised.revision_count} of ${env.maxRevisionsPerAsset} is queued.`,
+        reason: `Critic REVISE for ${asset.plan_key}: ${blockingFeedback} ${renderCriticChecks(routing)} Revision ${revised.revision_count} of ${env.maxRevisionsPerAsset} is queued.`,
       };
     }
 
@@ -826,7 +957,7 @@ const critique: NodeFn = async (ctx): Promise<NodeResult> => {
   await markAssetRejected(asset.id);
   return {
     next: 'select_alternative',
-    reason: `Critic REJECT for ${asset.plan_key}: a score reached 3 or below. The rejected asset is preserved while the Strategist searches unused segments.`,
+    reason: `Critic REJECT for ${asset.plan_key}: ${routing.materiallyContradicted ? 'the source is materially contradicted' : 'a score reached 3 or below'}. The rejected asset is preserved while the Strategist searches unused segments.`,
   };
 };
 
@@ -947,7 +1078,9 @@ const selectAlternativeNode: NodeFn = async (ctx): Promise<NodeResult> => {
       campaignId,
       planKey: rejected.plan_key,
       rejectedTopic: original.topic,
-      rejectionFeedback: review.feedback,
+      rejectionFeedback:
+        review.blocking_feedback ??
+        'The Critic rejected this asset. Choose a meaningfully different source moment and preserve the campaign brief.',
       assetType: original.type,
       candidates,
       remainingVideoSeconds: remainingVideoSeconds ?? undefined,
@@ -1116,23 +1249,64 @@ const campaignReview: NodeFn = async (ctx): Promise<NodeResult> => {
   const reviewAssets = await buildCampaignReviewAssets(passingPlans, assetByKey);
   const unusedSegments = await getUnusedSegments(campaignId);
   const reviewSegments = unusedSegments.map(toCampaignReviewSegment);
+  const strategyContext = campaignReviewStrategyContext(plan);
+  const reviewInput = {
+    campaignId,
+    strategyVersion: strategy.version,
+    assets: reviewAssets,
+    unusedSegments: reviewSegments,
+    strategyContext,
+    goal: campaign.goal,
+    audience: campaign.audience,
+    brandVoice: campaign.brand_voice,
+  };
 
   const stored = await getCampaignReview(campaignId, strategy.version);
   let review = stored
     ? parseCampaignReview(stored)
     : (await getCampaignReviewRun(campaignId, strategy.version))?.review ??
       (await reviewCampaign({
-        campaignId,
-        strategyVersion: strategy.version,
-        assets: reviewAssets,
-        unusedSegments: reviewSegments,
-        goal: campaign.goal,
-        audience: campaign.audience,
-        brandVoice: campaign.brand_voice,
+        ...reviewInput,
+        onHistoryConflict: async (conflicts) => {
+          await emit({
+            campaignId,
+            agent: 'campaign_reviewer',
+            node: 'campaign_review',
+            level: 'warn',
+            message: `Campaign Reviewer proposed a replacement that contradicts rejected-topic history; requesting one repair: ${conflicts.join(' ')}`,
+            data: { strategy_version: strategy.version, conflicts } as Json,
+          });
+        },
       }));
 
+  const historyConflicts = exactHistoryConflicts(review, strategyContext.rejectedTopics);
+  if (historyConflicts.length > 0) {
+    await emit({
+      campaignId,
+      agent: 'campaign_reviewer',
+      node: 'campaign_review',
+      level: 'warn',
+      message: `Campaign Reviewer history conflict found in a durable result; requesting one repair: ${historyConflicts.join(' ')}`,
+      data: { strategy_version: strategy.version, conflicts: historyConflicts } as Json,
+    });
+    review = await reviewCampaign({
+      ...reviewInput,
+      repairFeedback: historyConflicts.join(' '),
+      onHistoryConflict: async (conflicts) => {
+        await emit({
+          campaignId,
+          agent: 'campaign_reviewer',
+          node: 'campaign_review',
+          level: 'warn',
+          message: `Campaign Reviewer repair still contradicts rejected-topic history: ${conflicts.join(' ')}`,
+          data: { strategy_version: strategy.version, conflicts } as Json,
+        });
+      },
+    });
+  }
+
   const modelDecision = review.decision;
-  const routing = decideCampaignReview(review);
+  let routing = decideCampaignReview(review);
   if (routing.decision === 'REPLAN') {
     const segments = await getSegments(campaignId);
     const replacedPlanKeys = new Set(
@@ -1148,9 +1322,13 @@ const campaignReview: NodeFn = async (ctx): Promise<NodeResult> => {
     review = ensureReplanRecommendation(review, reviewAssets, reviewSegments, {
       maxVideoSeconds: campaign.max_video_seconds,
       remainingVideoSeconds,
-    });
+    }, strategyContext.rejectedTopics);
   }
-  const persisted = await recordCampaignReview(campaignId, strategy.version, review);
+  // Recompute after deterministic replacement normalization. The effective
+  // decision is the only decision allowed to route the graph or reach the
+  // final approval gate.
+  routing = decideCampaignReview(review);
+  const persisted = await recordCampaignReview(campaignId, strategy.version, review, modelDecision);
 
   await emit({
     campaignId,
@@ -1170,34 +1348,90 @@ const campaignReview: NodeFn = async (ctx): Promise<NodeResult> => {
     } as Json,
   });
 
-  if (routing.decision === 'REPLAN' && campaign.replan_count < env.maxCampaignReplans) {
-    const counted = campaign.replan_count >= strategy.version;
-    return {
-      next: 'replan',
-      patch: counted ? undefined : { replan_count: campaign.replan_count + 1 },
-      reason: counted
-        ? `Resuming the Campaign Reviewer's REPLAN for strategy v${strategy.version}; the replan budget was already reserved before a worker retry.`
-        : `Campaign Reviewer found a repetitive portfolio and queued replan ${campaign.replan_count + 1} of ${env.maxCampaignReplans}.`,
-    };
-  }
-
   if (routing.decision === 'REPLAN') {
-    await emit({
-      campaignId,
-      agent: 'campaign_reviewer',
-      node: 'campaign_review',
-      level: 'warn',
-      message: `Campaign Reviewer requested a replan, but all ${env.maxCampaignReplans} campaign replans are spent. The final gate will decide whether to ship this portfolio.`,
-      data: { strategy_version: strategy.version, replan_count: campaign.replan_count },
-    });
+    const transitionKind = 'campaign_replan' as const;
+    const counters = transitionCounters(campaign);
+    if (
+      transitionBudgetExhausted(counters, transitionKind, {
+        maxPlanRevisions: env.maxPlanRevisions,
+        maxPortfolioReplans: env.maxPortfolioReplans,
+      })
+    ) {
+      const warning = transitionBudgetWarning(transitionKind, counters, {
+        maxPlanRevisions: env.maxPlanRevisions,
+        maxPortfolioReplans: env.maxPortfolioReplans,
+      });
+      await emit({
+        campaignId,
+        agent: 'campaign_reviewer',
+        node: 'campaign_review',
+        level: 'warn',
+        message: `Campaign Reviewer requested a portfolio replan, but the ${warning} The final gate will decide whether to ship this portfolio.`,
+        data: {
+          strategy_version: strategy.version,
+          budget: counterForTransition(transitionKind),
+          count: counters.portfolio_replan_count,
+          limit: env.maxPortfolioReplans,
+        },
+      });
+    } else {
+      const charge = await chargeCampaignTransition({
+        campaignId,
+        strategyVersion: strategy.version,
+        transitionKind,
+        maxCount: env.maxPortfolioReplans,
+      });
+      if (charge.budgetExhausted) {
+        await emit({
+          campaignId,
+          agent: 'campaign_reviewer',
+          node: 'campaign_review',
+          level: 'warn',
+          message: `Campaign Reviewer requested a portfolio replan, but the portfolio-replans budget is exhausted (${charge.portfolioReplanCount}/${env.maxPortfolioReplans}). The final gate will decide whether to ship this portfolio.`,
+          data: { strategy_version: strategy.version },
+        });
+        return {
+          next: 'await_final_approval',
+          reason: 'The portfolio still needs a replan, but the portfolio-replan budget is exhausted; pausing at the final approval gate.',
+          data: {
+            strategy_version: strategy.version,
+            transition_kind: transitionKind,
+            budget_exhausted: true,
+            queued_node: 'await_final_approval',
+          },
+        };
+      }
+      return {
+        next: 'replan',
+        reason: charge.charged
+          ? `Campaign Reviewer found a repetitive portfolio and queued portfolio replan ${charge.portfolioReplanCount} of ${env.maxPortfolioReplans}.`
+          : `Resuming the Campaign Reviewer's REPLAN for strategy v${strategy.version}; portfolio replan ${charge.portfolioReplanCount} of ${env.maxPortfolioReplans} was already charged before a worker retry.`,
+        data: {
+          strategy_version: strategy.version,
+          transition_kind: transitionKind,
+          transition_charged: charge.charged,
+          queued_node: 'replan',
+          portfolio_replan_count: charge.portfolioReplanCount,
+        },
+      };
+    }
   }
 
   return {
     next: 'await_final_approval',
     reason:
       routing.decision === 'REPLAN'
-        ? 'The portfolio still needs a replan, but the campaign replan limit is exhausted; pausing at the final approval gate.'
+        ? 'The portfolio still needs a replan, but the portfolio-replan budget is exhausted; pausing at the final approval gate.'
         : `Campaign Reviewer approved the portfolio at ${review.scores.overall.toFixed(1)}/100 overall; pausing for final human approval.`,
+    data:
+      routing.decision === 'REPLAN'
+        ? {
+            strategy_version: strategy.version,
+            transition_kind: 'campaign_replan',
+            budget_exhausted: true,
+            queued_node: 'await_final_approval',
+          }
+        : undefined,
   };
 };
 
@@ -1353,10 +1587,34 @@ const awaitFinalApproval: NodeFn = async (): Promise<NodeResult> => ({
 
 /**
  * Mark the campaign complete only after the final portfolio has a durable,
- * exportable shape. The route performs the filesystem check again at download
- * time because local media can be removed after the worker finishes.
+ * exportable shape and a valid final approval provenance event. The route
+ * performs the filesystem check again at download time because local media can
+ * be removed after the worker finishes.
  */
 const finalize: NodeFn = async (ctx): Promise<NodeResult> => {
+  const review = await getLatestCampaignReview(ctx.campaignId);
+  if (!review) throw new Error('Finalize found no Campaign Reviewer decision.');
+  if (review.effective_decision !== 'APPROVE' && review.effective_decision !== 'REPLAN') {
+    throw new Error(`Finalize found an invalid effective Campaign Reviewer decision: ${review.effective_decision}.`);
+  }
+  const provenance = await getFinalApprovalProvenance(ctx.campaignId, review.id);
+  if (!provenance || provenance.reviewVersion !== review.version) {
+    throw new Error('Finalize found no durable final approval for the latest Campaign Reviewer review.');
+  }
+  if (provenance.effectiveDecision !== review.effective_decision) {
+    throw new Error('Finalize found final approval provenance for a different effective Campaign Reviewer decision.');
+  }
+  const expectedMode = review.effective_decision === 'APPROVE' ? 'reviewer_approved' : 'human_override';
+  if (provenance.completionMode !== expectedMode) {
+    throw new Error(`Finalize found ${provenance.completionMode} provenance for an ${review.effective_decision} review.`);
+  }
+  const completionNote = provenance.completionMode === 'human_override'
+    ? provenance.completionNote?.trim() ?? ''
+    : null;
+  if (provenance.completionMode === 'human_override' && !completionNote) {
+    throw new Error('Finalize found a human override without a rationale.');
+  }
+
   const assets = await getCampaignAssets(ctx.campaignId);
   const selected = selectExportAssets(assets);
   if (selected.length === 0) {
@@ -1376,7 +1634,12 @@ const finalize: NodeFn = async (ctx): Promise<NodeResult> => {
 
   return {
     next: null,
-    patch: { status: 'complete', error: null },
+    patch: {
+      status: 'complete',
+      completion_mode: provenance.completionMode,
+      completion_note: completionNote,
+      error: null,
+    },
     reason: `Finalized ${selected.length} Critic-passed asset${selected.length === 1 ? '' : 's'}; rejected, abandoned, replaced, and unfinished history stays out of the package.`,
   };
 };
@@ -1400,6 +1663,37 @@ export const NODES: Partial<Record<NodeId, NodeFn>> = {
 };
 
 const ACTIVE_ASSET_STATUSES = new Set(['planned', 'generating', 'revising', 'needs_review']);
+
+function renderDirectorChanges(
+  changes: Array<{
+    plan_key: string | null;
+    field: string;
+    instruction: string;
+    target_platform: string | null;
+  }>,
+): string {
+  return changes
+    .map(
+      (change) =>
+        `${change.plan_key ? `${change.plan_key} ` : ''}${change.field}${change.target_platform ? ` -> ${change.target_platform}` : ''}: ${change.instruction}`,
+    )
+    .join(' ');
+}
+
+/** Compatibility seam until generated Supabase types include the Phase 2 columns. */
+function transitionCounters(campaign: CampaignRow): {
+  plan_revision_count: number;
+  portfolio_replan_count: number;
+} {
+  const row = campaign as CampaignRow & {
+    plan_revision_count?: number;
+    portfolio_replan_count?: number;
+  };
+  return {
+    plan_revision_count: row.plan_revision_count ?? 0,
+    portfolio_replan_count: row.portfolio_replan_count ?? 0,
+  };
+}
 
 function hasGeneratedOutput(asset: AssetRow, type: PlannedAsset['type']): boolean {
   return asset.content !== null && (type !== 'short_video' || asset.media_url !== null);
@@ -1502,7 +1796,7 @@ async function buildCampaignReviewAssets(
         content: asset.content,
         sourceSegmentIds: asset.source_segment_ids,
         criticScores: review.scores,
-        criticFeedback: review.feedback,
+        criticFeedback: review.blocking_feedback ?? '',
       };
     }),
   );
@@ -1520,18 +1814,43 @@ function toCampaignReviewSegment(segment: SegmentRow): CampaignReviewSegment {
   };
 }
 
+function campaignReviewStrategyContext(plan: ReturnType<typeof planFromStrategy>): CampaignReviewStrategyContext {
+  return {
+    rationale: plan.rationale,
+    plannedAssets: plan.planned_assets.map((asset) => ({
+      planKey: asset.plan_key,
+      type: asset.type,
+      platform: asset.platform,
+      topic: asset.topic,
+      purpose: asset.purpose,
+      segmentIds: asset.segment_ids,
+    })),
+    selectedTopics: plan.planned_assets.map((asset) => ({
+      planKey: asset.plan_key,
+      topic: asset.topic,
+      segmentIds: asset.segment_ids,
+    })),
+    rejectedTopics: plan.rejected_topics.map((topic) => ({
+      topic: topic.topic,
+      reason: topic.reason,
+      segmentIds: topic.segment_ids,
+    })),
+  };
+}
+
 function parseCampaignReview(row: {
   scores: Json;
   problems: Json;
   recommendations: Json;
   decision: string;
+  model_decision?: string | null;
 }): CampaignReview {
-  const parsed = CampaignReviewSchema.safeParse({
+  const parsed = CampaignReviewSchema.safeParse(normalizeCampaignReview({
     scores: row.scores,
     problems: row.problems,
     recommendations: row.recommendations,
-    decision: row.decision,
-  });
+    decision: row.model_decision ?? row.decision,
+  }));
   if (!parsed.success) throw new Error(`Campaign Reviewer result in the database is invalid: ${parsed.error.message}`);
   return parsed.data;
 }
@@ -1561,6 +1880,25 @@ async function preserveRemovedPassingAssets(
 
 function isWrittenType(type: string): type is WrittenAssetType {
   return type === 'x_thread' || type === 'linkedin_post';
+}
+
+function renderCriticChecks(routing: ReturnType<typeof decideCritic>): string {
+  if (routing.failedChecks.length === 0) return 'All required checks passed.';
+  return `Required checks failed: ${routing.failedChecks.map((check) => check.replace(/_/g, ' ')).join(', ')}.`;
+}
+
+function blockingFeedbackForRevision(
+  review: CriticReview,
+  routing: ReturnType<typeof decideCritic>,
+): string {
+  if (review.blocking_feedback) return review.blocking_feedback;
+  if (routing.groundingAuditFailures.length > 0) {
+    return `Fix semantic grounding before resubmitting: ${routing.groundingAuditFailures.join(' ')}`;
+  }
+  if (routing.failedChecks.length > 0) {
+    return `Fix the failed required checks: ${routing.failedChecks.map((check) => check.replace(/_/g, ' ')).join(', ')}.`;
+  }
+  return 'Raise the weakest Critic dimensions until the asset clears the shipping threshold.';
 }
 
 function labelForWrittenType(type: WrittenAssetType): string {

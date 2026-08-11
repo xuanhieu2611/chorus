@@ -100,7 +100,8 @@ export type ContentType = (typeof CONTENT_TYPES)[number];
  * to fix something `.slice(0, 3)` fixes for free. Numeric ranges joined them
  * once a provider rejected `minimum`/`maximum` outright: the same model id can be
  * served by several providers, and a campaign must not depend on which one
- * answered. `clamp01` at the merge step is what actually holds scores in 0..1.
+ * answered. Payload-level normalization below holds scores in 0..1 and rejects
+ * a provider that mixes scales.
  */
 const CandidateSchema = z.object({
   start_time: z.number(),
@@ -108,7 +109,7 @@ const CandidateSchema = z.object({
   topic: z.string(),
   summary: z.string(),
   content_type: z.enum(CONTENT_TYPES),
-  // Bounds live in `clamp01` at the merge step, not in the schema: some
+  // Bounds live in payload normalization at the merge step, not in the schema: some
   // OpenRouter providers reject `minimum`/`maximum` outright. See
   // `lib/agents/critic.ts` for the failure this came from.
   energy: z.number(),
@@ -141,6 +142,27 @@ export const ReduceSchema = z.object({
 });
 
 export type Candidate = z.infer<typeof CandidateSchema>;
+
+type ScorePayloadItem = {
+  energy: number;
+  standalone_score: number;
+  novelty_score?: number;
+};
+
+type ScorePass = 'map' | 'reduce' | 'final';
+
+export interface AnalystWarning {
+  kind: 'score_scale_normalized' | 'score_saturation';
+  message: string;
+  data: Json;
+}
+
+interface ScoreNormalizationDiagnostics<T> {
+  items: T[];
+  normalizedFromTen: boolean;
+  rawScores: number[];
+  normalizedScores: number[];
+}
 
 /** A segment as this agent finally emits it: validated, snapped, and text-backed. */
 export interface AnalyzedSegment {
@@ -180,6 +202,7 @@ export interface AnalystInput {
   brandVoice: string | null;
   onProgress?: (info: { done: number; of: number; candidates: number }) => void;
   onWindowFailure?: (info: { index: number; error: string }) => void;
+  onWarning?: (warning: AnalystWarning) => void;
   /**
    * Window geometry, overridable so the multi-window path can be exercised
    * against real speech without a 90 minute recording. Production always uses
@@ -319,6 +342,73 @@ export function snapToWords(
 }
 
 /**
+ * Normalize one complete model payload, rather than repairing scores one by
+ * one. A single payload must use one scale: either the contract's 0..1 scale,
+ * or a consistently returned 1..10 scale that can be converted without
+ * guessing which individual values were meant to be fractional.
+ */
+export function normalizeScorePayload<T extends ScorePayloadItem>(payload: readonly T[]): T[] {
+  return normalizeScorePayloadWithDiagnostics(payload).items;
+}
+
+function normalizeScorePayloadWithDiagnostics<T extends ScorePayloadItem>(
+  payload: readonly T[],
+): ScoreNormalizationDiagnostics<T> {
+  const rawScores = payload.flatMap((item) => [
+    item.energy,
+    item.standalone_score,
+    ...(item.novelty_score === undefined ? [] : [item.novelty_score]),
+  ]);
+
+  for (const score of rawScores) {
+    if (!Number.isFinite(score)) {
+      throw new Error('Source Analyst score payload contains a non-finite ranking score.');
+    }
+    if (score < 0 || score > 10) {
+      throw new Error(`Source Analyst ranking score ${String(score)} is outside the 0..10 range.`);
+    }
+  }
+
+  const hasAboveOne = rawScores.some((score) => score > 1);
+  const hasFractionalBelowOne = rawScores.some(
+    (score) => score > 0 && score < 1 && !Number.isInteger(score),
+  );
+
+  if (!hasAboveOne) {
+    return {
+      items: payload.map((item) => ({ ...item })),
+      normalizedFromTen: false,
+      rawScores,
+      normalizedScores: rawScores,
+    };
+  }
+
+  if (hasFractionalBelowOne) {
+    throw new Error(
+      'Source Analyst score payload mixes the 0..1 and 1..10 scales; return one scale for the whole payload.',
+    );
+  }
+
+  const items = payload.map((item) => ({
+    ...item,
+    energy: item.energy / 10,
+    standalone_score: item.standalone_score / 10,
+    ...(item.novelty_score === undefined ? {} : { novelty_score: item.novelty_score / 10 }),
+  }));
+
+  return {
+    items,
+    normalizedFromTen: true,
+    rawScores,
+    normalizedScores: items.flatMap((item) => [
+      item.energy,
+      item.standalone_score,
+      ...(item.novelty_score === undefined ? [] : [item.novelty_score]),
+    ]),
+  };
+}
+
+/**
  * The code half of the analyst: everything the model proposed, made legal.
  *
  * Order matters. Filler is dropped first so a filler segment cannot win a
@@ -330,14 +420,19 @@ export function snapToWords(
 export function normalizeSegments(
   proposed: Array<z.infer<typeof ReducedSegmentSchema>>,
   words: Word[],
-  options: { maxSegments?: number; minSeconds?: number } = {},
+  options: { maxSegments?: number; minSeconds?: number; onWarning?: (warning: AnalystWarning) => void } = {},
 ): AnalyzedSegment[] {
   const maxSegments = options.maxSegments ?? MAX_SEGMENTS;
   const minSeconds = options.minSeconds ?? MIN_SEGMENT_SECONDS;
 
+  const normalized = normalizeScorePayloadWithDiagnostics(proposed);
+  if (normalized.normalizedFromTen) {
+    options.onWarning?.(scoreScaleWarning('final', normalized));
+  }
+
   const legal: AnalyzedSegment[] = [];
 
-  for (const item of proposed) {
+  for (const item of normalized.items) {
     // Filler is a label the analyst is explicitly asked to apply, and applying
     // it is the point. Storing it would hand the Strategist a pool it has to
     // re-filter with a more expensive model.
@@ -355,13 +450,9 @@ export function normalizeSegments(
       topic: item.topic.trim(),
       summary: item.summary.trim(),
       content_type: item.content_type,
-      // The schema already rejects out-of-range scores and the repair pass fixes
-      // them, but `segments.energy` has a `between 0 and 1` check constraint and
-      // an insert that trips it fails the whole node. Clamping is the cheap
-      // guarantee that a scoring quirk never becomes a database error.
-      energy: clamp01(item.energy),
-      standalone_score: clamp01(item.standalone_score),
-      novelty_score: clamp01(item.novelty_score),
+      energy: item.energy,
+      standalone_score: item.standalone_score,
+      novelty_score: item.novelty_score,
       potential_hooks: item.potential_hooks
         .map((hook) => hook.trim())
         .filter((hook) => hook !== '')
@@ -373,11 +464,28 @@ export function normalizeSegments(
 
   const deduped = dropDuplicates(legal);
 
-  return deduped
+  const ranked = deduped
     .slice()
-    .sort((a, b) => strength(b) - strength(a))
+    .sort((a, b) => segmentStrength(b) - segmentStrength(a))
     .slice(0, maxSegments)
     .sort((a, b) => a.start_time - b.start_time);
+
+  if (ranked.length > 1 && ranked.every((segment) => sameRanking(segment, ranked[0]))) {
+    options.onWarning?.({
+      kind: 'score_saturation',
+      message: `Source Analyst ranking scores are saturated across all ${ranked.length} surviving segments.`,
+      data: {
+        segment_count: ranked.length,
+        raw_distribution: ranked.map((segment) => ({
+          energy: segment.energy,
+          standalone_score: segment.standalone_score,
+          novelty_score: segment.novelty_score,
+        })),
+      },
+    });
+  }
+
+  return ranked;
 }
 
 /**
@@ -391,7 +499,7 @@ export function dropDuplicates(
   segments: AnalyzedSegment[],
   ratio = DUPLICATE_OVERLAP_RATIO,
 ): AnalyzedSegment[] {
-  const byStrength = [...segments].sort((a, b) => strength(b) - strength(a));
+  const byStrength = [...segments].sort((a, b) => segmentStrength(b) - segmentStrength(a));
   const kept: AnalyzedSegment[] = [];
 
   for (const candidate of byStrength) {
@@ -417,13 +525,31 @@ function overlapRatio(a: AnalyzedSegment, b: AnalyzedSegment): number {
  * point that needs ten minutes of setup is worth less here than a good one that
  * does not.
  */
-function strength(segment: AnalyzedSegment): number {
+export function segmentStrength(segment: Pick<AnalyzedSegment, 'energy' | 'standalone_score' | 'novelty_score'>): number {
   return segment.standalone_score * 2 + segment.novelty_score * 1.5 + segment.energy;
 }
 
-function clamp01(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return Math.min(1, Math.max(0, value));
+function sameRanking(
+  left: Pick<AnalyzedSegment, 'energy' | 'standalone_score' | 'novelty_score'>,
+  right: Pick<AnalyzedSegment, 'energy' | 'standalone_score' | 'novelty_score'>,
+): boolean {
+  return (
+    left.energy === right.energy &&
+    left.standalone_score === right.standalone_score &&
+    left.novelty_score === right.novelty_score
+  );
+}
+
+function scoreScaleWarning(pass: ScorePass, diagnostics: ScoreNormalizationDiagnostics<ScorePayloadItem>): AnalystWarning {
+  return {
+    kind: 'score_scale_normalized',
+    message: `Source Analyst ${pass} scores were returned on a 1..10 scale and normalized to 0..1.`,
+    data: {
+      pass,
+      raw_scores: diagnostics.rawScores,
+      normalized_scores: diagnostics.normalizedScores,
+    },
+  };
 }
 
 function round(value: number, places: number): number {
@@ -486,7 +612,9 @@ export async function analyzeSource(input: AnalystInput): Promise<AnalysisResult
   }
 
   const reduced = await reduceCandidates(input, candidates, objective);
-  const segments = normalizeSegments(reduced.segments, input.words);
+  const segments = normalizeSegments(reduced.segments, input.words, {
+    onWarning: input.onWarning,
+  });
 
   if (segments.length === 0) {
     throw new Error(
@@ -527,6 +655,7 @@ async function mapWindow(
       `Extract every self-contained moment worth turning into short-form content. Return between 0 and 6 candidates; return none rather than padding the list with filler.`,
       `Timestamps must be real seconds copied from the transcript above, inside ${window.startSec.toFixed(1)} to ${window.endSec.toFixed(1)}.`,
       'A candidate normally runs 20 to 120 seconds: long enough to make a point, short enough to hold attention.',
+      `Score scale: ${SCORE_SCALE_INSTRUCTIONS}`,
       '',
       objective,
     ].join('\n'),
@@ -538,7 +667,11 @@ async function mapWindow(
     } as Json,
   });
 
-  return result.value.candidates;
+  const normalized = normalizeScorePayloadWithDiagnostics(result.value.candidates);
+  if (normalized.normalizedFromTen) {
+    input.onWarning?.(scoreScaleWarning('map', normalized));
+  }
+  return normalized.items;
 }
 
 async function reduceCandidates(
@@ -585,6 +718,7 @@ async function reduceCandidates(
       '2. Drop anything that is filler, throat-clearing, or unintelligible without the rest of the episode. Dropping is a real decision; a shorter, stronger list beats a complete one.',
       `3. Score \`novelty_score\` **relative to the other candidates here**, which is the only place it can be judged. A point three candidates make is not novel no matter how well it is made.`,
       `4. Return ${MIN_TARGET_SEGMENTS} to ${MAX_SEGMENTS} segments, best first is not required; they will be re-sorted.`,
+      `Score scale: ${SCORE_SCALE_INSTRUCTIONS}`,
       '',
       'Keep the timestamps you were given. Do not invent boundaries that were not in the candidate list.',
       '',
@@ -593,14 +727,24 @@ async function reduceCandidates(
     input: { candidate_count: candidates.length } as Json,
   });
 
-  return result.value;
+  const normalized = normalizeScorePayloadWithDiagnostics(result.value.segments);
+  if (normalized.normalizedFromTen) {
+    input.onWarning?.(scoreScaleWarning('reduce', normalized));
+  }
+  return { ...result.value, segments: normalized.items };
 }
+
+const SCORE_SCALE_INSTRUCTIONS = [
+  'Use one score scale only: `energy`, `standalone_score`, and `novelty_score` are decimal values from 0.0 to 1.0, never 1 to 10.',
+  'Anchors: 0.2 means low, 0.6 means moderate, and 0.9 means exceptional.',
+].join(' ');
 
 const MAP_SYSTEM = [
   'You find moments in a podcast that would work as standalone short-form content.',
   '',
   'The test for every candidate: could someone who has never heard this episode understand it in the first five seconds and get something out of it?',
   'Rate `standalone_score` against that test and nothing else. Score `energy` on delivery - conviction, pace, emphasis - not on how important the topic is.',
+  SCORE_SCALE_INSTRUCTIONS,
   '`context_deps` names what a viewer would have to already know; leave it null when the answer is nothing.',
   'Be honest with `content_type`. Labelling filler as filler is useful work, not a failure to find something.',
 ].join('\n');
@@ -610,6 +754,7 @@ const REDUCE_SYSTEM = [
   '',
   'You are the only stage that sees the whole episode at once, so you own the two judgements no single window could make: which candidates are the same moment, and which points are actually novel within this episode.',
   'A tight list of strong, distinct segments is worth more than a complete inventory. The next agent plans a campaign from what you return, and it cannot recover the material you leave out - but it also cannot un-see near-duplicates you leave in.',
+  SCORE_SCALE_INSTRUCTIONS,
 ].join('\n');
 
 /**

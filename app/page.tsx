@@ -1,56 +1,73 @@
 import { connection } from 'next/server';
-import { Card, CardContent } from '@/components/ui/card';
+import Link from 'next/link';
 import { NewCampaignForm } from '@/components/NewCampaignForm';
-import { AGENT_ROSTER } from '@/lib/graph/view';
+import { Button } from '@/components/ui/button';
 import { env } from '@/lib/env';
 
 export default async function Home() {
-  // Read MAX_ASSETS from the server at request time so the form and API stay
-  // aligned when the same build is promoted between environments.
   await connection();
 
   return (
-    <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-10 px-6 py-14">
-      <header className="flex max-w-2xl flex-col gap-4">
-        <h1 className="text-4xl font-semibold tracking-tighter">Chorus</h1>
-        <p className="text-muted-foreground text-lg leading-relaxed text-balance">
-          One long-form podcast and a growth objective, turned into a multi-platform campaign by
-          seven agents that decide what is worth making, critique their own output, and review the
-          result as a portfolio.
-        </p>
-      </header>
+    <main className="home-shell mx-auto grid min-h-dvh w-full max-w-[1500px] px-5 py-5 lg:grid-cols-[minmax(0,1fr)_minmax(26rem,0.72fr)] lg:gap-12 xl:px-8">
+      <section className="flex min-h-0 flex-col">
+        <header className="flex items-center justify-between">
+          <div className="chorus-wordmark text-base">
+            <span className="chorus-glyph" aria-hidden><i /><i /><i /></span>
+            <span>chorus</span>
+          </div>
+          <span className="text-muted-foreground hidden font-mono text-[9px] uppercase tracking-[0.18em] sm:block">
+            agentic content studio
+          </span>
+        </header>
 
-      <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1.05fr)_minmax(300px,0.95fr)]">
-        <Card>
-          <CardContent className="pt-6">
-            <NewCampaignForm maxAssets={env.maxAssets} />
-          </CardContent>
-        </Card>
-
-        <section className="flex flex-col gap-4" aria-labelledby="roster-heading">
-          <h2 id="roster-heading" className="text-sm font-semibold">
-            Who works on it
-          </h2>
-          <ol className="border-border divide-border divide-y overflow-hidden rounded-xl border">
-            {AGENT_ROSTER.map((agent, index) => (
-              <li key={agent.key} className="bg-card flex items-baseline gap-3 px-4 py-3">
-                <span className="text-muted-foreground w-4 shrink-0 font-mono text-[11px]">
-                  {index + 1}
-                </span>
-                <span className="min-w-0 flex-1 text-sm font-medium">{agent.label}</span>
-                <span className="text-muted-foreground shrink-0 text-xs">{agent.role}</span>
-              </li>
-            ))}
-          </ol>
-          <p className="text-muted-foreground text-xs leading-relaxed">
-            The dashboard streams every decision these agents make while the run is in flight, and
-            pauses at two approval gates for you. The app and the worker are two processes: run{' '}
-            <code className="font-mono">npm run dev</code> and{' '}
-            <code className="font-mono">npm run worker</code> side by side, or a campaign sits
-            queued forever.
+        <div className="flex flex-1 flex-col justify-center py-16 lg:py-8">
+          <p className="text-state-active mb-5 text-[10px] font-semibold uppercase tracking-[0.22em]">
+            One source / full campaign
           </p>
-        </section>
-      </div>
+          <h1 className="max-w-3xl text-[clamp(3.1rem,6vw,6.6rem)] font-semibold leading-[0.88] tracking-[-0.07em] text-balance">
+            Seven agents.<br />One point of view.
+          </h1>
+          <p className="text-muted-foreground mt-7 max-w-[32rem] text-base leading-7 text-pretty">
+            Drop in a podcast. Chorus finds the signal, plans the campaign, creates every asset, and critiques the set before anything ships.
+          </p>
+
+          <div className="mt-10 flex max-w-2xl items-center gap-2" aria-label="Campaign workflow">
+            {['Understand', 'Strategize', 'Create', 'Critique', 'Ship'].map((phase, index) => (
+              <div key={phase} className="home-phase">
+                <span>0{index + 1}</span>
+                <strong>{phase}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <footer className="text-muted-foreground flex items-center justify-between font-mono text-[9px] uppercase tracking-[0.14em]">
+          <span>Human judgment stays in the loop</span>
+          <span className="hidden sm:block">Live graph / grounded outputs</span>
+        </footer>
+      </section>
+
+      <section className="flex items-center py-12 lg:py-0" aria-labelledby="new-campaign-heading">
+        <div className="launch-panel w-full p-5 sm:p-6">
+          <div className="mb-6 flex items-end justify-between gap-4">
+            <div>
+              <p className="text-muted-foreground text-[10px] font-medium uppercase tracking-[0.18em]">New campaign</p>
+              <h2 id="new-campaign-heading" className="mt-2 text-xl font-semibold tracking-[-0.035em]">Give the agents a brief</h2>
+            </div>
+            <span className="launch-status"><i /> ready</span>
+          </div>
+          <NewCampaignForm maxAssets={env.maxAssets} />
+          <div className="mt-5 flex items-center gap-3 border-t border-border pt-5">
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-medium">Review the full product first</p>
+              <p className="text-muted-foreground mt-1 text-[10px] leading-4">Local mock data. No upload, worker, transcription, or model calls.</p>
+            </div>
+            <Button asChild variant="outline" size="sm" className="shrink-0">
+              <Link href="/demo">Open walkthrough</Link>
+            </Button>
+          </div>
+        </div>
+      </section>
     </main>
   );
 }
