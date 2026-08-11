@@ -16,6 +16,7 @@ import { analyzeSource } from '@/lib/agents/source-analyst';
 import {
   CREDIT_COST,
   createStrategy,
+  normalizeReplan,
   replanStrategy,
   selectAlternative,
   validateReplan,
@@ -1260,11 +1261,34 @@ const replan: NodeFn = async (ctx): Promise<NodeResult> => {
     maxVideoSeconds: campaign.max_video_seconds,
     platforms: campaign.platforms,
   };
+  // A durable proposal is raw model output from `agent_runs`: schema-valid, but
+  // it never went through the semantic checks or the normalizer, and the plan it
+  // was written against may have moved since. If it no longer holds, it is worth
+  // exactly nothing and the Strategist runs again. Throwing here instead failed a
+  // campaign on a stale proposal that a fresh call would have replaced.
   const durableRun = await getReplanRun(campaignId, sourceStrategy.version, targetVersion);
-  const proposed = durableRun?.plan ?? (await replanStrategy(replanInput));
+  const durablePlan = durableRun?.plan ?? null;
+  const staleViolations = durablePlan ? validateReplan(durablePlan, replanInput) : [];
+
+  if (durablePlan && staleViolations.length > 0) {
+    await emit({
+      campaignId,
+      agent: 'content_strategist',
+      node: 'replan',
+      level: 'warn',
+      message: `A saved replan proposal for v${targetVersion} no longer satisfies the campaign constraints; regenerating it. ${staleViolations.join('; ')}`,
+      data: { target_version: targetVersion, violations: staleViolations },
+    });
+  }
+
+  const proposed =
+    durablePlan && staleViolations.length === 0
+      ? normalizeReplan(durablePlan, replanInput)
+      : await replanStrategy(replanInput);
+
   const violations = validateReplan(proposed, replanInput);
   if (violations.length > 0) {
-    throw new Error(`Durable replan output is no longer valid: ${violations.join('; ')}`);
+    throw new Error(`Replan proposal is not legal: ${violations.join('; ')}`);
   }
 
   const newPlanKeys = new Set(proposed.planned_assets.map((asset) => asset.plan_key));

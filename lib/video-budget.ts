@@ -92,6 +92,26 @@ export function remainingVideoBudget(input: {
   assets: readonly BudgetAsset[];
   excludePlanKey?: string;
 }): number {
+  return Math.max(0, input.maxVideoSeconds - reservedVideoDuration(input));
+}
+
+/**
+ * What the portfolio's video assets currently hold of the allowance.
+ *
+ * An asset that has already rendered reserves the duration it actually produced;
+ * one that has not reserves its bounded source span. The distinction matters: the
+ * Clip Producer picks a tight sub-span, so a 83 second source segment routinely
+ * becomes a 27 second clip. Charging a rendered asset for its source span made a
+ * replan impossible to satisfy, because the kept assets were charged 161 seconds
+ * for 97 seconds of real video and no legal plan existed.
+ */
+export function reservedVideoDuration(input: {
+  maxVideoSeconds: number;
+  plannedAssets: readonly PlannedVideoAsset[];
+  segments: readonly TimedSegment[];
+  assets: readonly BudgetAsset[];
+  excludePlanKey?: string;
+}): number {
   const assetByKey = new Map(input.assets.map((asset) => [asset.plan_key, asset]));
   let reserved = 0;
 
@@ -112,7 +132,7 @@ export function remainingVideoBudget(input: {
     reserved += measuredDuration ?? plannedDuration;
   }
 
-  return Math.max(0, input.maxVideoSeconds - reserved);
+  return reserved;
 }
 
 export function countsTowardVideoBudget(status: string | null | undefined): boolean {

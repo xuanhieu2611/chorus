@@ -8,6 +8,11 @@ const GroundingSchema = z.object({
   source_quote: z.string().trim().min(1),
 });
 
+/**
+ * The internal shape. This union is never sent to a model: providers serving
+ * Claude reject `oneOf` outright, so a discriminated union fails the request
+ * before the model answers.
+ */
 export const WrittenAssetSchema = z.object({
   hook: z.string().trim().min(1),
   content: z.discriminatedUnion('kind', [
@@ -17,13 +22,57 @@ export const WrittenAssetSchema = z.object({
     }),
     z.object({
       kind: z.literal('x_thread'),
-      tweets: z.array(z.string().trim().min(1)).min(3).max(9),
+      tweets: z.array(z.string().trim().min(1)).min(1),
     }),
   ]),
   grounding: z.array(GroundingSchema).min(1),
 });
 
 export type WrittenAsset = z.infer<typeof WrittenAssetSchema>;
+
+/**
+ * What the model is actually asked for, one flat object per platform.
+ *
+ * The plan already fixes the asset type, so the model was never choosing between
+ * variants; the union only ever described which branch production had picked.
+ * Asking for one concrete shape removes the `oneOf` and the `kind` literal with
+ * it, and gives the model a tighter contract. `kind` is reattached in code.
+ *
+ * Thread length stays out: `minItems` above 1 and `maxItems` are both rejected
+ * through this path, so `validateGrounding` owns the 3 to 9 range.
+ */
+export const LinkedInOutputSchema = z.object({
+  hook: z.string().trim().min(1),
+  body: z.string().trim().min(1),
+  grounding: z.array(GroundingSchema).min(1),
+});
+
+export const ThreadOutputSchema = z.object({
+  hook: z.string().trim().min(1),
+  tweets: z.array(z.string().trim().min(1)).min(1),
+  grounding: z.array(GroundingSchema).min(1),
+});
+
+type WriterOutput =
+  | z.infer<typeof LinkedInOutputSchema>
+  | z.infer<typeof ThreadOutputSchema>;
+
+/** The concrete shape asked of the model for one planned asset type. */
+function outputSchemaFor(type: WrittenAssetType): z.ZodType<WriterOutput> {
+  return type === 'linkedin_post' ? LinkedInOutputSchema : ThreadOutputSchema;
+}
+
+/** Reattach the discriminator the model was not asked to produce. */
+function toWrittenAsset(type: WrittenAssetType, output: WriterOutput): WrittenAsset {
+  return {
+    hook: output.hook,
+    content:
+      type === 'linkedin_post'
+        ? { kind: 'linkedin_post', body: (output as z.infer<typeof LinkedInOutputSchema>).body }
+        : { kind: 'x_thread', tweets: (output as z.infer<typeof ThreadOutputSchema>).tweets },
+    grounding: output.grounding,
+  };
+}
 export type WrittenAssetType = Extract<PlannedAsset['type'], 'x_thread' | 'linkedin_post'>;
 
 export interface WritingSource {
@@ -69,7 +118,7 @@ export async function writeAsset(input: WriterInput): Promise<WrittenAsset> {
       agent: 'writing_agent',
       node: 'produce',
       role: 'reasoning',
-      schema: WrittenAssetSchema,
+      schema: outputSchemaFor(input.type),
       schemaName: 'grounded_written_asset',
       schemaDescription: 'A platform-native written asset with exact transcript quotes for its claims.',
       system: WRITER_SYSTEM,
@@ -127,8 +176,9 @@ export async function writeAsset(input: WriterInput): Promise<WrittenAsset> {
       } as Json,
     });
 
-    groundingFailures = validateGrounding(result.value, input.type, input.sources);
-    if (groundingFailures.length === 0) return normalizeWrittenAsset(result.value);
+    const asset = toWrittenAsset(input.type, result.value);
+    groundingFailures = validateGrounding(asset, input.type, input.sources);
+    if (groundingFailures.length === 0) return normalizeWrittenAsset(asset);
   }
 
   throw new Error(
@@ -151,6 +201,10 @@ export function validateGrounding(
     failures.push(`LinkedIn body is ${asset.content.body.length} characters; the limit is 3000`);
   }
   if (asset.content.kind === 'x_thread') {
+    const count = asset.content.tweets.length;
+    if (count < 3 || count > 9) {
+      failures.push(`thread has ${count} tweet${count === 1 ? '' : 's'}; it must have 3 to 9`);
+    }
     for (const [index, tweet] of asset.content.tweets.entries()) {
       if (tweet.length > 280) {
         failures.push(`tweet ${index + 1} is ${tweet.length} characters; the limit is 280`);

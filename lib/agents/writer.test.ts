@@ -89,3 +89,24 @@ test('quote bank creates overlapping verbatim options that pass grounding', () =
     assert.deepEqual(validateGrounding(linkedin(quote), 'linkedin_post', sources), []);
   }
 });
+
+test('thread length is enforced in code now that the schema cannot carry it', () => {
+  // `.min(3).max(9)` on the schema made providers serving Claude reject the
+  // request outright, so validateGrounding owns the range instead.
+  const thread = (tweets: string[]): WrittenAsset => ({
+    hook: 'A thread hook',
+    content: { kind: 'x_thread', tweets },
+    grounding: [{ claim: 'Talk to five customers.', source_quote: 'talk to five customers' }],
+  });
+
+  assert.deepEqual(validateGrounding(thread(['One', 'Two', 'Three']), 'x_thread', sources), []);
+
+  assert.match(
+    validateGrounding(thread(['One', 'Two']), 'x_thread', sources)[0],
+    /2 tweets; it must have 3 to 9/,
+  );
+  assert.match(
+    validateGrounding(thread(Array.from({ length: 10 }, (_, i) => `t${i}`)), 'x_thread', sources)[0],
+    /10 tweets; it must have 3 to 9/,
+  );
+});

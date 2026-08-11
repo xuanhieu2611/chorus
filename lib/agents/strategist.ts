@@ -7,6 +7,7 @@ import {
   plannedVideoDuration,
   plannedVideoDurationForAsset,
   remainingVideoBudget,
+  reservedVideoDuration,
   sourceSpanDuration,
   type BudgetAsset,
 } from '@/lib/video-budget';
@@ -21,12 +22,18 @@ export const PlannedAssetSchema = z.object({
   topic: z.string(),
   purpose: z.string(),
   segment_ids: z.array(z.string()).min(1),
-  credits: z.number().int(),
+  // Not `.int()`: Zod renders that with safe-integer `minimum`/`maximum`, which
+  // some OpenRouter providers reject. `validateStrategy` already requires this to
+  // equal `CREDIT_COST[type]` and `normalizeStrategy` overwrites it, so the
+  // integer bound was never what made the number trustworthy.
+  credits: z.number(),
 });
 
 export const StrategySchema = z.object({
   rationale: z.string(),
-  planned_assets: z.array(PlannedAssetSchema).min(2),
+  // `validateStrategy` requires the two-asset minimum. Providers serving Claude
+  // reject `minItems` above 1, so expressing it here fails the request outright.
+  planned_assets: z.array(PlannedAssetSchema).min(1),
   rejected_topics: z.array(z.object({ topic: z.string(), reason: z.string() })).min(1),
 });
 
@@ -176,6 +183,8 @@ export async function replanStrategy(input: ReplanInput): Promise<StrategyPlan> 
 
     violations = validateReplan(result.value, input);
     if (violations.length === 0) return normalizeReplan(result.value, input);
+    // The retry prompt names the violations, so a model that returned the wrong
+    // keys gets one chance to return the right ones.
   }
 
   throw new Error(`Content Strategist could not produce a legal replan: ${violations.join('; ')}`);
@@ -184,7 +193,15 @@ export async function replanStrategy(input: ReplanInput): Promise<StrategyPlan> 
 /** Pure semantic checks for a replan. Exported so the relationship contract is
  * testable without paying for a model call. */
 export function validateReplan(plan: StrategyPlan, input: ReplanInput): string[] {
-  const violations = validateStrategy(plan, input.segments, input);
+  // Budget, platform and video checks run against the *normalized* plan, not the
+  // raw one. `normalizeReplan` already owns every field a replan is not allowed
+  // to move - type, platform, source segment ids, credits - by rebuilding each
+  // entry from the previous plan and the Reviewer's recommendation. Judging the
+  // raw plan on those fields failed campaigns for something code was about to
+  // correct anyway: a real run died on "costs 2 credits, not 3" for a value
+  // `normalizeReplan` overwrites on the next line. What the model actually owns
+  // here is the topic, the purpose, and which keys it returns.
+  const violations = validateStrategy(normalizeReplan(plan, input), input.segments, input);
   const replacementKeys = replacementKeysFor(input);
   const previousByKey = new Map(input.previous.planned_assets.map((asset) => [asset.plan_key, asset]));
   const actualByKey = new Map(plan.planned_assets.map((asset) => [asset.plan_key, asset]));
@@ -195,37 +212,14 @@ export function validateReplan(plan: StrategyPlan, input: ReplanInput): string[]
       if (actualByKey.has(previous.plan_key)) {
         violations.push(`${previous.plan_key} must be removed from the revised plan`);
       }
-      const replacement = actualByKey.get(replacementKey);
-      if (!replacement) {
+      if (!actualByKey.has(replacementKey)) {
         violations.push(`replacement ${replacementKey} is missing from the revised plan`);
-        continue;
-      }
-      if (replacement.type !== previous.type || replacement.platform !== previous.platform) {
-        violations.push(`${replacementKey} must keep type ${previous.type} and platform ${previous.platform}`);
-      }
-      const recommendation = input.review.recommendations.find(
-        (item) => item.action === 'replace' && item.plan_key === previous.plan_key,
-      );
-      if (
-        recommendation &&
-        !sameIds(replacement.segment_ids, recommendation.replacement_segment_ids)
-      ) {
-        violations.push(`${replacementKey} must use the Reviewer's replacement segment ids`);
       }
       continue;
     }
 
-    const kept = actualByKey.get(previous.plan_key);
-    if (!kept) {
+    if (!actualByKey.has(previous.plan_key)) {
       violations.push(`kept asset ${previous.plan_key} is missing from the revised plan`);
-      continue;
-    }
-    if (
-      kept.type !== previous.type ||
-      kept.platform !== previous.platform ||
-      !sameIds(kept.segment_ids, previous.segment_ids)
-    ) {
-      violations.push(`${previous.plan_key} changed even though the Reviewer did not replace it`);
     }
   }
 
@@ -351,7 +345,12 @@ function replacementVideoCapacity(
   return { remainingVideoSeconds, replacementVideoSeconds };
 }
 
-function normalizeReplan(plan: StrategyPlan, input: ReplanInput): StrategyPlan {
+/**
+ * Force every field a replan does not own. Exported because the graph reuses a
+ * durable replan proposal from `agent_runs`, which is raw model output that has
+ * never been through this.
+ */
+export function normalizeReplan(plan: StrategyPlan, input: ReplanInput): StrategyPlan {
   const replacementKeys = replacementKeysFor(input);
   const generatedByKey = new Map(plan.planned_assets.map((asset) => [asset.plan_key, asset]));
 
@@ -379,10 +378,6 @@ function normalizeReplan(plan: StrategyPlan, input: ReplanInput): StrategyPlan {
       reason: item.reason.trim(),
     })),
   };
-}
-
-function sameIds(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((id) => right.includes(id));
 }
 
 /**
@@ -536,13 +531,19 @@ export async function selectAlternative(input: AlternativeInput): Promise<Altern
 export function validateStrategy(
   strategy: StrategyPlan,
   segments: SegmentRow[],
-  constraints: StrategyConstraints,
+  constraints: StrategyConstraints & { existingAssets?: BudgetAsset[] },
 ): string[] {
   const violations: string[] = [];
   const segmentById = new Map(segments.map((segment) => [segment.id, segment]));
   const planKeys = new Set<string>();
   let credits = 0;
   let plannedVideoSeconds = 0;
+
+  if (strategy.planned_assets.length < 2) {
+    violations.push(
+      `planned ${strategy.planned_assets.length} asset${strategy.planned_assets.length === 1 ? '' : 's'}, but a campaign is a portfolio and needs at least 2`,
+    );
+  }
 
   if (strategy.planned_assets.length > constraints.maxAssets) {
     violations.push(
@@ -595,9 +596,24 @@ export function validateStrategy(
     }
   }
 
-  if (plannedVideoSeconds > constraints.maxVideoSeconds) {
+  // A replan supplies the rows that already exist, and an asset that has rendered
+  // reserves what it actually produced rather than the source span it was planned
+  // from. Without this a replan is judged on spans nobody can still change: kept
+  // assets are fixed by code and the replacement's segment ids come from the
+  // Reviewer, so an over-budget total had no legal correction and the retry
+  // returned the identical number.
+  const totalVideoSeconds = constraints.existingAssets
+    ? reservedVideoDuration({
+        maxVideoSeconds: constraints.maxVideoSeconds,
+        plannedAssets: strategy.planned_assets,
+        segments,
+        assets: constraints.existingAssets,
+      })
+    : plannedVideoSeconds;
+
+  if (totalVideoSeconds > constraints.maxVideoSeconds) {
     violations.push(
-      `planned short videos use ${plannedVideoSeconds.toFixed(1)} seconds in total, above the ${constraints.maxVideoSeconds} second campaign-wide video budget`,
+      `planned short videos use ${totalVideoSeconds.toFixed(1)} seconds in total, above the ${constraints.maxVideoSeconds} second campaign-wide video budget`,
     );
   }
 

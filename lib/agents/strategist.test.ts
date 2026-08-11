@@ -301,3 +301,72 @@ test('validateReplan rejects a replacement that breaks the combined video budget
     validateReplan(revised, input).some((error) => error.includes('campaign-wide video budget')),
   );
 });
+
+test('validateStrategy enforces the two-asset portfolio minimum in code', () => {
+  // The rule used to be `.min(2)` on the schema. Providers serving Claude reject
+  // minItems above 1, so the schema cannot carry it and this check must.
+  const thin = plan({ planned_assets: [plan().planned_assets[0]] });
+  const errors = validateStrategy(thin, segments, constraints);
+  assert.ok(
+    errors.some((error) => error.includes('at least 2')),
+    `expected a portfolio-minimum violation, got ${JSON.stringify(errors)}`,
+  );
+});
+
+test('validateReplan lets normalization own the fields a replan cannot move', () => {
+  // A real campaign died here: the model returned the replacement as a 2 credit
+  // asset, and validation rejected it for a value `normalizeReplan` overwrites
+  // with CREDIT_COST on the next line. Type, platform, segment ids and credits
+  // are code's to set, so they must not also be code's to reject.
+  const previous: StrategyPlan = plan();
+  const input = {
+    campaignId: 'c1',
+    previous,
+    review: {
+      decision: 'REPLAN' as const,
+      scores: { asset_quality: 70, diversity: 42, audience_fit: 70, brand_consistency: 70, overall: 60 },
+      rationale: 'Too repetitive.',
+      problems: [{ issue: 'Two assets cover the same idea.', asset_plan_keys: ['asset_2'] }],
+      recommendations: [
+        {
+          action: 'replace' as const,
+          plan_key: 'asset_2',
+          replacement_topic: 'A distinct topic',
+          replacement_segment_ids: ['s3'],
+        },
+      ],
+    },
+    segments,
+    targetVersion: 2,
+    occupiedPlanKeys: [],
+    goal: 'Grow an audience.',
+    audience: null,
+    brandVoice: null,
+    ...constraints,
+  };
+
+  const wrongFields: StrategyPlan = {
+    ...previous,
+    planned_assets: [
+      previous.planned_assets[0],
+      {
+        ...previous.planned_assets[1],
+        plan_key: 'asset_2_v2',
+        topic: 'A distinct topic',
+        type: 'x_thread',
+        platform: 'x',
+        credits: 2,
+        segment_ids: ['s1'],
+      },
+    ],
+  };
+
+  assert.deepEqual(validateReplan(wrongFields, input), []);
+
+  // Presence is still the model's responsibility and still fails loudly.
+  assert.ok(
+    validateReplan({ ...wrongFields, planned_assets: [previous.planned_assets[0]] }, input).some(
+      (error) => error.includes('missing from the revised plan'),
+    ),
+  );
+});

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   plannedVideoDurationForAsset,
   remainingVideoBudget,
+  reservedVideoDuration,
   totalPassedVideoDuration,
   videoBudgetError,
 } from './video-budget';
@@ -90,4 +91,49 @@ test('finalization accepts an exact cap and rejects a passed portfolio above it'
   assert.equal(videoBudgetError(120, 120), null);
   assert.match(videoBudgetError(120.01, 120) ?? '', /120\.01/);
   assert.match(videoBudgetError(120.01, 120) ?? '', /campaign-wide video budget/);
+});
+
+test('a rendered asset reserves what it produced, not the span it was planned from', () => {
+  // The deadlock this came from: two kept clips were charged 161.2s of source
+  // span for 97.1s of real video, so a replan had no legal solution and the
+  // Strategist returned the identical over-budget total on every retry.
+  const planned = [
+    { plan_key: 'kept_1', type: 'short_video', segment_ids: ['s1'] },
+    { plan_key: 'kept_2', type: 'short_video', segment_ids: ['s3'] },
+  ];
+  const rendered = [
+    { plan_key: 'kept_1', type: 'short_video', status: 'passed', duration_sec: 20 },
+    { plan_key: 'kept_2', type: 'short_video', status: 'passed', duration_sec: 25 },
+  ];
+
+  const bySource = reservedVideoDuration({
+    maxVideoSeconds: 180,
+    plannedAssets: planned,
+    segments,
+    assets: [],
+  });
+  const byRender = reservedVideoDuration({
+    maxVideoSeconds: 180,
+    plannedAssets: planned,
+    segments,
+    assets: rendered,
+  });
+
+  assert.equal(bySource, 170, 's1 is 70s and s3 is 100s of source span');
+  assert.equal(byRender, 45, 'the rendered clips are what actually ship');
+  assert.ok(byRender < bySource, 'a tight sub-span must free allowance for a replan');
+});
+
+test('an unrendered asset still reserves its bounded source span', () => {
+  const reserved = reservedVideoDuration({
+    maxVideoSeconds: 180,
+    plannedAssets: [
+      { plan_key: 'kept_1', type: 'short_video', segment_ids: ['s1'] },
+      { plan_key: 'replacement', type: 'short_video', segment_ids: ['s3'] },
+    ],
+    segments,
+    // Only the kept asset has rendered; the replacement has no row yet.
+    assets: [{ plan_key: 'kept_1', type: 'short_video', status: 'passed', duration_sec: 20 }],
+  });
+  assert.equal(reserved, 120, '20s rendered plus the replacement 100s source span');
 });
