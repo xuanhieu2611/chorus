@@ -47,7 +47,11 @@ function campaign(): CampaignRow {
     has_video_stream: true,
     status: 'complete',
     current_node: 'finalize',
+    plan_revision_count: 0,
+    portfolio_replan_count: 0,
     replan_count: 0,
+    completion_mode: null,
+    completion_note: null,
     error: null,
     claimed_at: null,
     claimed_by: null,
@@ -86,7 +90,11 @@ test('final export budget accepts an exact cap and rejects an over-budget portfo
 
 test('export manifest uses safe, stable entry names and campaign summary', () => {
   const manifest = buildCampaignExportManifest({
-    campaign: campaign(),
+    campaign: {
+      ...campaign(),
+      completion_mode: 'human_override',
+      completion_note: 'Editorial review accepted the remaining repetition.',
+    },
     assets: [
       asset({
         plan_key: '../bad key/one',
@@ -103,4 +111,33 @@ test('export manifest uses safe, stable entry names and campaign summary', () =>
   assert.match(manifest.assets[0]?.markdown ?? '', /First/);
   assert.match(manifest.campaignMarkdown, /Rejected, abandoned, replaced/);
   assert.equal(safeFilename('..//'), 'asset');
+});
+
+test('campaign markdown preserves completion provenance and unresolved review problems', () => {
+  const manifest = buildCampaignExportManifest({
+    campaign: {
+      ...campaign(),
+      completion_mode: 'human_override',
+      completion_note: 'Editorial review accepted the remaining repetition.',
+    },
+    assets: [asset({ media_path: null })],
+    campaignReview: {
+      id: 'review-id',
+      campaign_id: 'campaign-id',
+      version: 2,
+      scores: { diversity: 42, overall: 70 },
+      problems: [{ issue: 'Two assets repeat the same argument.', asset_plan_keys: ['asset_1'] }],
+      recommendations: [],
+      decision: 'APPROVE',
+      model_decision: 'APPROVE',
+      effective_decision: 'REPLAN',
+      created_at: '2026-08-10T00:00:00.000Z',
+    },
+  });
+
+  assert.match(manifest.campaignMarkdown, /Completion mode: human_override/);
+  assert.match(manifest.campaignMarkdown, /Completion rationale: Editorial review accepted the remaining repetition/);
+  assert.match(manifest.campaignMarkdown, /Effective decision: REPLAN/);
+  assert.match(manifest.campaignMarkdown, /Unresolved reviewer problems/);
+  assert.match(manifest.campaignMarkdown, /Two assets repeat the same argument/);
 });

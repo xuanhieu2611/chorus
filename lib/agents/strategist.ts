@@ -2,7 +2,11 @@ import { z } from 'zod';
 import { callStructured } from '@/lib/llm/structured';
 import type { Json } from '@/lib/db/database.types';
 import type { SegmentRow } from '@/lib/db/client';
-import type { CampaignReview } from '@/lib/agents/campaign-reviewer';
+import {
+  exactHistoryMatches,
+  type CampaignReview,
+  type CampaignReviewRejectedTopic,
+} from '@/lib/agents/campaign-reviewer';
 import {
   plannedVideoDuration,
   plannedVideoDurationForAsset,
@@ -29,12 +33,20 @@ export const PlannedAssetSchema = z.object({
   credits: z.number(),
 });
 
+const RejectedTopicSchema = z.object({
+  topic: z.string(),
+  reason: z.string(),
+  // The default keeps legacy strategy rows readable while new model output
+  // still carries the exact source ids needed for deterministic reintroduction checks.
+  segment_ids: z.array(z.string()).default([]),
+});
+
 export const StrategySchema = z.object({
   rationale: z.string(),
   // `validateStrategy` requires the two-asset minimum. Providers serving Claude
   // reject `minItems` above 1, so expressing it here fails the request outright.
   planned_assets: z.array(PlannedAssetSchema).min(1),
-  rejected_topics: z.array(z.object({ topic: z.string(), reason: z.string() })).min(1),
+  rejected_topics: z.array(RejectedTopicSchema).min(1),
 });
 
 export type StrategyPlan = z.infer<typeof StrategySchema>;
@@ -114,7 +126,15 @@ export async function replanStrategy(input: ReplanInput): Promise<StrategyPlan> 
   const replacementKeys = replacementKeysFor(input);
   const replacementInstructions = replacements.map((recommendation) => {
     const replacementKey = replacementKeys.get(recommendation.plan_key)!;
-    return `- Replace ${recommendation.plan_key} with ${replacementKey}. Topic: ${recommendation.replacement_topic}. Exact unused segment ids: ${recommendation.replacement_segment_ids.join(', ')}.`;
+    return [
+      `- Replace ${recommendation.plan_key} with ${replacementKey}.`,
+      `Topic: ${recommendation.replacement_topic}.`,
+      `Exact unused segment ids: ${recommendation.replacement_segment_ids.join(', ')}.`,
+      `Replacement reason: ${recommendation.replacement_reason}.`,
+      recommendation.prior_rejection_addressed
+        ? `Prior rejection addressed: ${recommendation.prior_rejection_addressed}.`
+        : 'Prior rejection addressed: none; do not deliberately reverse a rejected topic.',
+    ].join(' ');
   });
   const keepInstructions = input.previous.planned_assets
     .filter((asset) => !replacementKeys.has(asset.plan_key))
@@ -154,6 +174,10 @@ export async function replanStrategy(input: ReplanInput): Promise<StrategyPlan> 
         '',
         'Campaign Reviewer scorecard:',
         JSON.stringify(input.review, null, 2),
+        '',
+        'Rejected-topic history from the previous strategy:',
+        ...renderRejectedTopicHistory(input.previous.rejected_topics),
+        'If a replacement deliberately reverses one of these rejections, the rationale must begin with "Deliberate reversal:" and name the rejected topic or segment plus why the portfolio failure changes the tradeoff. Do not silently reintroduce it.',
         ...(input.humanFeedback ? ['', `Human final-review feedback: ${input.humanFeedback}`] : []),
         '',
         'Source segments:',
@@ -176,6 +200,7 @@ export async function replanStrategy(input: ReplanInput): Promise<StrategyPlan> 
         max_video_seconds: input.maxVideoSeconds,
         previous_plan: input.previous,
         campaign_review: input.review,
+        rejected_topic_history: input.previous.rejected_topics,
         human_feedback: input.humanFeedback ?? null,
         replacement_video_capacity: replacementCapacityInstructions,
       } as Json,
@@ -247,6 +272,8 @@ export function validateReplan(plan: StrategyPlan, input: ReplanInput): string[]
       `video replacements require ${capacity.replacementVideoSeconds.toFixed(1)} seconds, but only ${capacity.remainingVideoSeconds.toFixed(1)} seconds remain after kept assets`,
     );
   }
+
+  violations.push(...validateReversalAcknowledgements(plan, input));
 
   return violations;
 }
@@ -376,6 +403,7 @@ export function normalizeReplan(plan: StrategyPlan, input: ReplanInput): Strateg
     rejected_topics: plan.rejected_topics.map((item) => ({
       topic: item.topic.trim(),
       reason: item.reason.trim(),
+      segment_ids: [...new Set(item.segment_ids.map((id) => id.trim()).filter(Boolean))],
     })),
   };
 }
@@ -431,7 +459,7 @@ export async function createStrategy(input: StrategistInput): Promise<StrategyPl
         '- A short_video must target tiktok, an x_thread must target x, and a linkedin_post must target linkedin.',
         '- Only a source marked "video eligible: yes" can be used for a short_video.',
         '- Use only segment ids shown above. Prefer one segment per asset unless combining them has a clear editorial purpose.',
-        '- Reject at least one plausible topic and explain the tradeoff. Do not use the rejected list for filler.',
+        '- Reject at least one plausible topic and explain the tradeoff. Return the exact source segment ids for each rejected topic. Do not use the rejected list for filler.',
         ...(input.requiredChanges?.length
           ? ['', 'Required changes from the previous review:', ...input.requiredChanges.map((item) => `- ${item}`)]
           : []),
@@ -638,8 +666,49 @@ function normalizeStrategy(strategy: StrategyPlan): StrategyPlan {
     rejected_topics: strategy.rejected_topics.map((item) => ({
       topic: item.topic.trim(),
       reason: item.reason.trim(),
+      segment_ids: [...new Set(item.segment_ids.map((id) => id.trim()).filter(Boolean))],
     })),
   };
+}
+
+function renderRejectedTopicHistory(
+  topics: StrategyPlan['rejected_topics'],
+): string[] {
+  return topics.length > 0
+    ? topics.map(
+        (item) =>
+          `- ${item.topic} [${item.segment_ids.length ? item.segment_ids.join(', ') : 'no legacy segment ids'}]: ${item.reason}`,
+      )
+    : ['- (none)'];
+}
+
+function validateReversalAcknowledgements(plan: StrategyPlan, input: ReplanInput): string[] {
+  const rejectedTopics: CampaignReviewRejectedTopic[] = input.previous.rejected_topics.map((item) => ({
+    topic: item.topic,
+    reason: item.reason,
+    segmentIds: item.segment_ids,
+  }));
+  const rationale = plan.rationale.trim().toLocaleLowerCase();
+  const violations: string[] = [];
+
+  for (const recommendation of input.review.recommendations) {
+    if (recommendation.action !== 'replace') continue;
+    const matches = exactHistoryMatches(recommendation, rejectedTopics);
+    if (matches.length === 0) continue;
+
+    const namesHistory = matches.some(
+      (match) =>
+        rationale.includes(match.topic.trim().toLocaleLowerCase()) ||
+        match.segmentIds.some((segmentId) => rationale.includes(segmentId.trim().toLocaleLowerCase())),
+    );
+    if (!rationale.startsWith('deliberate reversal:') || !namesHistory) {
+      violations.push(
+        `rationale must begin with "Deliberate reversal:" and name the rejected topic or segment when replacing ${recommendation.plan_key} reverses prior rejection history`,
+      );
+    }
+  }
+
+  return violations;
 }
 
 function platformFor(type: PlannedAsset['type']): PlannedAsset['platform'] {
@@ -721,6 +790,7 @@ const REPLAN_SYSTEM = [
   'Replace only the named assets. Keep every other plan key, asset type, platform, and source segment id exactly unchanged.',
   'Use the exact suffixed replacement plan keys and unused segment ids supplied by the runtime. Do not invent ids or add assets.',
   'The replacement should have a clear purpose for the campaign objective and a topic that matches the supplied source segment.',
+  'If a replacement deliberately reverses a Strategist rejection, begin the rationale with "Deliberate reversal:" and name the rejected topic or segment plus why the portfolio failure changes the tradeoff.',
 ].join('\n');
 
 function describeObjective(input: Pick<StrategistInput, 'goal' | 'audience' | 'brandVoice'>): string {

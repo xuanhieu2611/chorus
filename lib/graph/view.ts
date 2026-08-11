@@ -190,16 +190,20 @@ export const GRAPH_EDGES: readonly GraphEdgeDefinition[] = [
   edge('transcribe', 'analyze'),
   edge('analyze', 'strategize'),
   edge('strategize', 'director_review_plan'),
-  route('director_review_plan', 'strategize', 'REJECT · replan left', { loop: true, side: 'l', offset: 46 }),
-  route('director_review_plan', 'finalize', 'REJECT · no replans left', { side: 'r', offset: 54 }),
-  edge('director_review_plan', 'await_strategy_approval', 'APPROVE'),
-  route('await_strategy_approval', 'strategize', 'Request changes', { loop: true, side: 'l', offset: 116 }),
-  edge('await_strategy_approval', 'produce', 'Approve'),
+  route('director_review_plan', 'strategize', 'REJECT · plan revision left', { loop: true, side: 'l', offset: 46 }),
+  route('director_review_plan', 'await_strategy_approval', 'REJECT · plan budget exhausted', {
+    id: 'director_review_plan->await_strategy_approval:budget-exhausted',
+    side: 'r',
+    offset: 54,
+  }),
+  edge('director_review_plan', 'await_strategy_approval', 'Plan approved'),
+  route('await_strategy_approval', 'strategize', 'Request changes · plan revision', { loop: true, side: 'l', offset: 116 }),
+  edge('await_strategy_approval', 'produce', 'Human approves'),
   edge('produce', 'critique'),
   edge('critique', 'more_assets', 'PASS'),
   route('critique', 'produce', 'REVISE', { loop: true, side: 'r', offset: 46 }),
   route('critique', 'select_alternative', 'REJECT', { sourceSide: 'l', targetSide: 'r', offset: 24 }),
-  route('critique', 'abandon_asset', 'REVISE · limit', { sourceSide: 'l', targetSide: 'r', offset: 96 }),
+  route('critique', 'abandon_asset', 'REVISE / limit reached', { sourceSide: 'l', targetSide: 'r', offset: 96 }),
   route('select_alternative', 'produce', 'alternative found', {
     loop: true,
     sourceSide: 't',
@@ -210,21 +214,21 @@ export const GRAPH_EDGES: readonly GraphEdgeDefinition[] = [
   route('abandon_asset', 'more_assets', undefined, { sourceSide: 'r', targetSide: 'l', offset: 24 }),
   route('more_assets', 'produce', 'yes', { loop: true, side: 'r', offset: 118 }),
   edge('more_assets', 'campaign_review', 'no'),
-  route('campaign_review', 'replan', 'REPLAN · under limit', {
+  route('campaign_review', 'replan', 'REPLAN · portfolio replan left', {
     loop: true,
     sourceSide: 'r',
     targetSide: 'l',
     offset: 24,
   }),
-  edge('campaign_review', 'await_final_approval', 'APPROVE / limit'),
+  edge('campaign_review', 'await_final_approval', 'APPROVE / portfolio budget exhausted'),
   route('replan', 'produce', undefined, { loop: true, sourceSide: 't', targetSide: 'r', offset: 190 }),
-  route('await_final_approval', 'replan', 'Request changes', {
+  route('await_final_approval', 'replan', 'Request changes · portfolio replan', {
     loop: true,
     sourceSide: 'r',
     targetSide: 'b',
     offset: 60,
   }),
-  edge('await_final_approval', 'finalize', 'Approve'),
+  edge('await_final_approval', 'finalize', 'Human approves'),
   edge('finalize', 'done'),
 ];
 
@@ -331,7 +335,9 @@ export function deriveGraphState(
   };
 
   for (const event of events) {
-    const displayNode = event.node ? RUNTIME_TO_DISPLAY.get(event.node) : undefined;
+    const displayNode = event.node
+      ? (RUNTIME_TO_DISPLAY.get(event.node) ?? (NODE_IDS.has(event.node) ? event.node : undefined))
+      : undefined;
     if (displayNode) {
       visited.add(displayNode);
       lastRuntimeNode = displayNode;
@@ -376,7 +382,10 @@ export function deriveGraphState(
       markEdge(graphEdgeId('more_assets', 'produce'));
       continue;
     }
-    const id = graphEdgeId(displayNode, nextDisplayNode);
+    const id =
+      event.node === 'director_review_plan' && event.message.includes('budget exhausted')
+        ? 'director_review_plan->await_strategy_approval:budget-exhausted'
+        : graphEdgeId(displayNode, nextDisplayNode);
     if (GRAPH_EDGES.some((candidate) => candidate.id === id)) markEdge(id);
   }
 
@@ -428,10 +437,10 @@ function route(
   source: string,
   target: string,
   label: string | undefined,
-  options: { loop?: boolean; side?: GraphSide; sourceSide?: GraphSide; targetSide?: GraphSide; offset?: number },
+  options: { id?: string; loop?: boolean; side?: GraphSide; sourceSide?: GraphSide; targetSide?: GraphSide; offset?: number },
 ): GraphEdgeDefinition {
   return {
-    id: graphEdgeId(source, target),
+    id: options.id ?? graphEdgeId(source, target),
     source,
     target,
     label,

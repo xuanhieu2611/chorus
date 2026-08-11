@@ -12,11 +12,15 @@ export interface CampaignSnapshot {
   goal: string;
   status: string;
   current_node: string | null;
+  completion_mode: 'reviewer_approved' | 'human_override' | null;
+  completion_note: string | null;
   source_duration_sec: number | null;
   has_video_stream: boolean | null;
   cost_usd: number | string;
   credits_spent: number;
   credit_budget: number;
+  portfolio_replan_count: number;
+  portfolio_replan_limit: number;
   error: string | null;
 }
 

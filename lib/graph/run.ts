@@ -79,7 +79,7 @@ export async function runGraph(initial: CampaignRow): Promise<GraphRunResult> {
       node,
       level: 'decision',
       message: result.reason,
-      data: { next: result.next },
+      data: { next: result.next, ...(result.data ?? {}) },
     });
 
     const from = node;

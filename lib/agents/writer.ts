@@ -146,6 +146,7 @@ export async function writeAsset(input: WriterInput): Promise<WrittenAsset> {
         '- Every source_quote must copy one contiguous span from a single <quote> above, without the tags or id.',
         '- You may shorten a listed quote only by removing whole words from its beginning or end. Never join quotes, insert ellipses, fix grammar, or change a word.',
         '- Claims may synthesize the source, but may not add facts the source does not support.',
+        '- Do not use diagnostic, clinical, or categorical shorthand such as "that is a dopamine problem" unless the supplied source explicitly makes that diagnosis. Describe what the source actually says and preserve its uncertainty instead.',
         ...(input.revisionFeedback
           ? [
               '',
@@ -304,5 +305,6 @@ const WRITER_SYSTEM = [
   'You are the Writing Agent for a podcast growth campaign.',
   'Turn selected source material into platform-native writing without inventing facts, examples, names, numbers, or quotations.',
   'Your grounding array is a correctness contract, not a bibliography. Map every factual claim to an exact verbatim quote from the supplied source excerpts.',
+  'Do not turn an observation into a diagnosis or categorical neuromodulator claim. Phrases such as "that is a dopamine problem" are prohibited unless the source itself makes that diagnosis.',
   'Exercise editorial judgement: preserve the speaker’s real idea while making it clear and useful to someone who has never heard the episode.',
 ].join('\n');

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   replacementPlanKey,
+  StrategySchema,
   validateReplan,
   validateStrategy,
   type StrategyPlan,
@@ -58,7 +59,7 @@ function plan(overrides: Partial<StrategyPlan> = {}): StrategyPlan {
         credits: 2,
       },
     ],
-    rejected_topics: [{ topic: 'Topic three', reason: 'It repeats the first argument.' }],
+    rejected_topics: [{ topic: 'Topic three', reason: 'It repeats the first argument.', segment_ids: ['s4'] }],
     ...overrides,
   };
 }
@@ -72,6 +73,18 @@ const constraints = {
 
 test('validateStrategy accepts a legal mixed-platform plan', () => {
   assert.deepEqual(validateStrategy(plan(), segments, constraints), []);
+});
+
+test('legacy rejected topics normalize missing segment ids to an empty array', () => {
+  const parsed = StrategySchema.parse({
+    ...plan(),
+    rejected_topics: [{ topic: 'Legacy topic', reason: 'It is too close to the selected angle.' }],
+  });
+  assert.deepEqual(parsed.rejected_topics, [{
+    topic: 'Legacy topic',
+    reason: 'It is too close to the selected angle.',
+    segment_ids: [],
+  }]);
 });
 
 test('validateStrategy enforces fixed costs and the total credit budget in code', () => {
@@ -201,6 +214,8 @@ test('validateReplan preserves kept assets and requires a suffixed replacement k
       plan_key: 'asset_2',
       replacement_topic: 'A distinct topic',
       replacement_segment_ids: ['s3'],
+      replacement_reason: 'The portfolio repeats the current argument.',
+      prior_rejection_addressed: null,
     }],
     decision: 'REPLAN',
   };
@@ -271,6 +286,8 @@ test('validateReplan rejects a replacement that breaks the combined video budget
         plan_key: 'asset_2',
         replacement_topic: 'A distinct topic',
         replacement_segment_ids: ['s3'],
+        replacement_reason: 'The portfolio repeats the current argument.',
+        prior_rejection_addressed: null,
       }],
       decision: 'REPLAN' as const,
     },
@@ -333,6 +350,8 @@ test('validateReplan lets normalization own the fields a replan cannot move', ()
           plan_key: 'asset_2',
           replacement_topic: 'A distinct topic',
           replacement_segment_ids: ['s3'],
+          replacement_reason: 'The portfolio repeats the current argument.',
+          prior_rejection_addressed: null,
         },
       ],
     },
@@ -368,5 +387,57 @@ test('validateReplan lets normalization own the fields a replan cannot move', ()
     validateReplan({ ...wrongFields, planned_assets: [previous.planned_assets[0]] }, input).some(
       (error) => error.includes('missing from the revised plan'),
     ),
+  );
+});
+
+test('validateReplan requires rationale acknowledgement for a deliberate rejection reversal', () => {
+  const previous = plan({
+    rejected_topics: [{
+      topic: 'Caffeine as a productivity hack',
+      reason: 'The brief is anti-hype.',
+      segment_ids: ['s3'],
+    }],
+  });
+  const input = {
+    campaignId: 'caffeine-campaign',
+    previous,
+    review: {
+      scores: { asset_quality: 70, diversity: 40, audience_fit: 70, brand_consistency: 70, overall: 60 },
+      problems: [{ issue: 'The portfolio repeats its argument.', asset_plan_keys: ['asset_2'] }],
+      recommendations: [{
+        action: 'replace' as const,
+        plan_key: 'asset_2',
+        replacement_topic: 'Caffeine as a productivity hack',
+        replacement_segment_ids: ['s3'],
+        replacement_reason: 'The portfolio now needs a skeptical counterpoint.',
+        prior_rejection_addressed: 'The replacement critiques the hype instead of endorsing it.',
+      }],
+      decision: 'REPLAN' as const,
+    },
+    segments,
+    targetVersion: 2,
+    occupiedPlanKeys: ['asset_1', 'asset_2'],
+    goal: 'Grow an audience',
+    audience: 'Builders',
+    brandVoice: 'Anti-hype',
+    ...constraints,
+  };
+  const revised = {
+    ...previous,
+    planned_assets: [
+      previous.planned_assets[0],
+      {
+        ...previous.planned_assets[1],
+        plan_key: 'asset_2_v2',
+        topic: 'Caffeine as a productivity hack',
+        segment_ids: ['s3'],
+      },
+    ],
+  };
+
+  assert.ok(validateReplan(revised, input).some((error) => error.includes('Deliberate reversal')));
+  assert.deepEqual(
+    validateReplan({ ...revised, rationale: 'Deliberate reversal: Caffeine as a productivity hack / s3 is now a critique of hype.' }, input),
+    [],
   );
 });

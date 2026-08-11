@@ -1,5 +1,5 @@
 import { db, type StrategyRow } from '@/lib/db/client';
-import { DirectorSchema, type DirectorReview } from '@/lib/agents/director';
+import { DirectorSchema, type DirectorChange, type DirectorReview } from '@/lib/agents/director';
 import {
   StrategySchema,
   type PlannedAsset,
@@ -169,7 +169,7 @@ export async function getRevisionRequest(
   if (director?.review.decision === 'REJECT') {
     candidates.push({
       source: 'content_director',
-      requiredChanges: director.review.required_changes,
+      requiredChanges: director.review.required_changes.map(renderDirectorChange),
       createdAt: director.createdAt,
     });
   }
@@ -185,6 +185,10 @@ export async function getRevisionRequest(
   }
 
   return candidates.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+}
+
+function renderDirectorChange(change: DirectorChange): string {
+  return `${change.plan_key ? `${change.plan_key} ` : ''}${change.field}${change.target_platform ? ` -> ${change.target_platform}` : ''}: ${change.instruction}`;
 }
 
 function strategyVersionOf(value: Json | null): number | null {

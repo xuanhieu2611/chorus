@@ -64,6 +64,7 @@ export {
   getCampaignReview,
   getCampaignReviewRun,
   getFinalApprovalFeedback,
+  getFinalApprovalProvenance,
   getLatestCampaignReview,
   getReplanRun,
   recordCampaignReview,
@@ -72,3 +73,8 @@ export {
   recordReview,
   type RecordReviewInput,
 } from '@/lib/tools/reviews';
+export {
+  chargeCampaignTransition,
+  type ChargeTransitionInput,
+  type ChargeTransitionResult,
+} from '@/lib/tools/transitions';

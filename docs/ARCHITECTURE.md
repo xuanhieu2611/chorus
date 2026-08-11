@@ -29,11 +29,11 @@ flowchart TD
     analyze --> strategize[strategize<br/>CONTENT STRATEGIST]
     strategize --> dirplan{director_review_plan<br/>CONTENT DIRECTOR}
 
-    dirplan -->|REJECT, replans left| strategize
-    dirplan -->|REJECT, no replans left| finalize
+    dirplan -->|REJECT, plan revision left| strategize
+    dirplan -->|REJECT, plan budget exhausted| gate1
     dirplan -->|APPROVE| gate1[/await_strategy_approval<br/>HUMAN GATE/]
 
-    gate1 -->|Request changes| strategize
+    gate1 -->|Request changes, plan revision| strategize
     gate1 -->|Approve| produce[produce<br/>CLIP PRODUCER + WRITING AGENT<br/>one asset at a time]
 
     produce --> critique[critique<br/>CONTENT CRITIC]
@@ -50,13 +50,13 @@ flowchart TD
     more_assets -->|yes| produce
     more_assets -->|no| creview{campaign_review<br/>CAMPAIGN REVIEWER}
 
-    creview -->|REPLAN, under limit| replan[replan<br/>STRATEGIST revises plan]
-    creview -->|REPLAN, at limit| gate2
+    creview -->|REPLAN, portfolio replan left| replan[replan<br/>STRATEGIST revises plan]
+    creview -->|REPLAN, portfolio budget exhausted| gate2
     creview -->|APPROVE| gate2[/await_final_approval<br/>HUMAN GATE/]
 
     replan --> produce
 
-    gate2 -->|Request changes| replan
+    gate2 -->|Request changes, portfolio replan| replan
     gate2 -->|Approve| finalize[finalize<br/>package + zip]
     finalize --> DONE([Campaign complete])
 
@@ -96,7 +96,7 @@ Agents call `lib/tools/` and nothing else. No agent file imports the Supabase cl
 
 ## Phase 6 decisions
 
-**The Critic does not own control flow.** `content_critic` returns six 1-to-10 scores and actionable feedback for one asset. TypeScript routes the result: any score at or below 3 is `REJECT`, an average of at least 7 with no score below 5 is `PASS`, and everything else is `REVISE`. The decision is stored in `reviews`, so a worker retry can apply the same edge without buying a second judgement.
+**The Critic does not own control flow.** `content_critic` returns six 1-to-10 scores, four explicit required checks, a direct-source-contradiction hook, and separate blocking and optional polish feedback for one asset. TypeScript routes the result: any score at or below 3 or a material source contradiction is `REJECT`; any failed required check, blocking feedback on an otherwise passing review, or score below the PASS threshold is `REVISE`; `PASS` requires every check, a 7 average, no score below 5, and null blocking feedback. The decision and explicit review fields are stored in `reviews`, so a worker retry can apply the same edge without buying a second judgement. Only blocking feedback reaches regeneration, while polish remains visible to reviewers.
 
 **Production is one asset at a time.** `produce` selects the first planned, revising, or in-progress row that is not terminal, then returns to `critique` as soon as that row is durable. A worker crash after a model call can reuse the successful `agent_runs` output, and a crash after rendering sees `needs_review` rather than generating the same asset again. This is the loop the dashboard can show rather than a bulk production phase hidden behind one status.
 
@@ -120,13 +120,13 @@ Agents call `lib/tools/` and nothing else. No agent file imports the Supabase cl
 
 **SSE carries events; the snapshot carries state.** The first `useEventStream` request uses the existing campaign snapshot contract and backfills the timeline. Each incoming event then triggers a cursor-based snapshot refresh, which keeps strategy versions, approval gates, review rows, assets, and media URLs in sync without putting database credentials in the browser. This is still poll-over-SSE, not Supabase Realtime: the worker and Next.js process remain independent.
 
-**The graph is a fixed map, not a layout result.** `lib/graph/view.ts` mirrors the section 6 Mermaid graph with hardcoded positions and edges. `more_assets` is a display-only decision because the executor resolves that branch inside `produce`, `critique`, and `abandon_asset`; it is derived from the corresponding decision events and does not become a graph node or a Phase 9 stub in the machine. `current_node` drives the active state, `Entering` events establish completed nodes, and decision events mark traversed edges. Loop-back edges stay animated after traversal so a revision, replan, or change request remains visible in the run history.
+**The graph is a fixed map, not a layout result.** `lib/graph/view.ts` mirrors the section 6 Mermaid graph with hardcoded positions and edges. Planning revision edges and portfolio replan edges have separate labels and budgets. `more_assets` is a display-only decision because the executor resolves that branch inside `produce`, `critique`, and `abandon_asset`; it is derived from the corresponding decision events and does not become a graph node or a Phase 9 stub in the machine. `current_node` drives the active state, `Entering` events establish completed nodes, and decision events mark traversed edges. Loop-back edges stay animated after traversal so a revision, replan, or change request remains visible in the run history.
 
 **Timeline detail is progressive.** The timeline renders newest-first by default, can switch to oldest-first, filters by the event's agent, and uses closed `details` elements for tool events. The graph's skipped state remains available for genuinely unbuilt future nodes, while a worker error marks the current node failed. `finalize` is complete when packaging validation succeeds.
 
 ## Phase 4 decisions
 
-**Grounding is a runtime property.** The Writing Agent sees verbatim transcript excerpts, not segment summaries. It also receives overlapping 24-word quote options generated deterministically from those excerpts, which gives weaker development models short spans they can copy without changing transcription grammar. Its output maps every factual claim to a `source_quote`, and TypeScript accepts a quote only when it occurs in one of the selected excerpts after normalizing case and whitespace. A semantic grounding failure gets one full regeneration with the exact bad claims and quotes named. A second failure stops the node, so an ungrounded asset never reaches `needs_review` or the UI as plausible finished work.
+**Grounding is a runtime property.** The Writing Agent sees verbatim transcript excerpts, not segment summaries. It also receives overlapping 24-word quote options generated deterministically from those excerpts, which gives weaker development models short spans they can copy without changing transcription grammar. Its output maps every factual claim to a `source_quote`, and TypeScript accepts a quote only when it occurs in one of the selected excerpts after normalizing case and whitespace. The already-paid Critic call then audits the complete grounding array semantically. TypeScript requires one audit row per claim, fails closed on missing, duplicate, or extra rows, and forces `source_supported = false` for unsupported or overstated claims. The resulting audit rows and pass/fail state are durable, so exact quote presence and semantic support remain separately visible.
 
 **Schema repair and editorial validation are different runs.** `callStructured` repairs malformed shape inside one `agent_runs` row. Grounding and platform lengths are runtime checks: the development model repeatedly ignored Zod string maxima because strict provider schemas are unavailable, while an exact failure such as `tweet 2 is 314 characters` produced a useful correction. A schema-valid but ungrounded or overlong asset therefore creates a separate regeneration row. The history shows whether the model failed to format an answer or failed the product's correctness contract.
 
@@ -140,9 +140,9 @@ Agents call `lib/tools/` and nothing else. No agent file imports the Supabase cl
 
 **A paid decision is graph memory.** Strategies are versioned rows. If the worker crashes after saving one but before leaving `strategize`, the node reuses it instead of paying to recreate it. The Director's successful structured output already lives in `agent_runs`; `getDirectorReview` treats that as the durable decision record, so a crash after review does not buy the same review twice. A Director or human rejection is the only reason the Strategist creates the next version.
 
-**Replan accounting is tied to strategy versions.** Initial strategy v1 exists before any replan. A rejection of v1 consumes replan 1 and creates v2; a rejection of v2 consumes replan 2 and creates v3. Comparing `replan_count` with the reviewed version makes the patch idempotent when a worker dies after incrementing the counter but before traversing the edge. The limit stays in TypeScript, never in a prompt.
+**Transition accounting is tied to strategy versions.** Initial strategy v1 exists before any revision. Director and first-gate changes charge `plan_revision_count`; Campaign Reviewer and final-gate changes charge `portfolio_replan_count`. `campaign_transition_charges` uses `(campaign_id, strategy_version, transition_kind)` as a unique idempotency key, and `charge_campaign_transition` updates the counter and charge row atomically. A retry after a crash returns the existing charge instead of incrementing again. Legacy backfill counts only durable transitions that queued `strategize` or `replan`; incomplete history conservatively preserves the legacy allowance in both counters.
 
-**The gate route chooses a resume node.** The gate itself leaves `current_node = 'await_strategy_approval'`. Approval must queue `produce`, while a change request must queue `strategize` after its feedback is durable. Flipping only `status` back to `queued` would make the worker re-enter the gate and pause forever. Human feedback is written as an event before the campaign becomes claimable, which lets the Strategist read the exact request without adding transient worker memory.
+**The gate route chooses a resume node.** The gate itself leaves `current_node = 'await_strategy_approval'` or `await_final_approval`. Approval queues `produce` or `finalize`; a change request queues `strategize` or `replan` after its feedback is durable. The request is recorded before the row becomes claimable, and a second event marks the transition as actually queued for migration backfills. Flipping only `status` back to `queued` would make the worker re-enter the gate and pause forever. First-gate changes charge the planning counter; final-gate changes charge the portfolio counter.
 
 ## Phase 2 decisions
 

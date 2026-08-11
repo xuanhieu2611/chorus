@@ -3,11 +3,14 @@ import { test } from 'node:test';
 import {
   dropDuplicates,
   normalizeSegments,
+  normalizeScorePayload,
   planWindows,
   renderWindow,
+  segmentStrength,
   snapToWords,
   textBetween,
   type AnalyzedSegment,
+  type AnalystWarning,
 } from './source-analyst';
 import type { Word } from '../media/transcribe';
 
@@ -137,6 +140,25 @@ function segment(overrides: Partial<AnalyzedSegment> = {}): AnalyzedSegment {
   };
 }
 
+type ProposedSegment = Parameters<typeof normalizeSegments>[0][number];
+
+function proposedSegment(overrides: Partial<ProposedSegment> = {}): ProposedSegment {
+  return {
+    start_time: 0,
+    end_time: 60,
+    topic: 'topic',
+    summary: 'summary',
+    content_type: 'advice',
+    energy: 0.5,
+    standalone_score: 0.5,
+    novelty_score: 0.5,
+    potential_hooks: [],
+    context_deps: null,
+    candidate_ids: [0],
+    ...overrides,
+  };
+}
+
 test('dropDuplicates keeps the stronger of two segments covering the same span', () => {
   const weak = segment({ topic: 'weak', start_time: 100, end_time: 160, standalone_score: 0.3 });
   const strong = segment({ topic: 'strong', start_time: 105, end_time: 165, standalone_score: 0.9 });
@@ -238,33 +260,131 @@ test('normalizeSegments drops filler and illegal boundaries, and keeps order', (
   assert.equal(output[0].transcript, textBetween(input, output[0].start_time, output[0].end_time));
 });
 
-test('normalizeSegments clamps scores that would violate the check constraint', () => {
-  // The schema rejects these and the repair pass usually fixes them, but an
-  // energy of 7 reaching Postgres fails the whole insert and takes the node with
-  // it. Clamping is the guarantee that a scoring quirk is never a DB error.
+test('normalizeSegments rejects scores that would violate the score contract', () => {
+  assert.throws(
+    () =>
+      normalizeSegments(
+        [
+          proposedSegment({
+            content_type: 'opinion',
+            energy: 7,
+            standalone_score: -2,
+            novelty_score: Number.NaN,
+          }),
+        ],
+        words(120),
+      ),
+    /ranking score/,
+  );
+});
+
+test('normalizeScorePayload preserves a valid 0..1 map payload exactly', () => {
+  const payload = [{ energy: 0.2, standalone_score: 0.6 }];
+  assert.deepEqual(normalizeScorePayload(payload), payload);
+});
+
+test('normalizeScorePayload converts a consistent 1..10 map payload', () => {
+  assert.deepEqual(
+    normalizeScorePayload([{ energy: 7, standalone_score: 8 }]),
+    [{ energy: 0.7, standalone_score: 0.8 }],
+  );
+});
+
+test('normalizeScorePayload converts a consistent 1..10 reduce payload', () => {
+  assert.deepEqual(
+    normalizeScorePayload([{ energy: 7, standalone_score: 8, novelty_score: 9 }]),
+    [{ energy: 0.7, standalone_score: 0.8, novelty_score: 0.9 }],
+  );
+});
+
+test('normalizeScorePayload rejects invalid and mixed score scales', () => {
+  for (const invalid of [-0.1, 10.1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => normalizeScorePayload([{ energy: invalid, standalone_score: 0.5 }]),
+      /score/,
+      `expected ${String(invalid)} to be rejected`,
+    );
+  }
+
+  assert.throws(
+    () => normalizeScorePayload([{ energy: 0.7, standalone_score: 7 }]),
+    /mixes the 0\.\.1 and 1\.\.10 scales/,
+  );
+});
+
+test('reduce scores on a 1-to-10 scale stay differentiated instead of saturating at 1', () => {
   const output = normalizeSegments(
     [
       {
         start_time: 0,
         end_time: 60,
-        topic: 't',
-        summary: 's',
-        content_type: 'opinion',
+        topic: 'dogfood score scale',
+        summary: 'The reduce pass returned the old 1-to-10 scale.',
+        content_type: 'advice',
         energy: 7,
-        standalone_score: -2,
-        novelty_score: Number.NaN,
+        standalone_score: 8,
+        novelty_score: 9,
         potential_hooks: [],
         context_deps: null,
-        candidate_ids: [0],
+        candidate_ids: [7, 8, 9],
       },
     ],
     words(120),
   );
 
-  assert.equal(output.length, 1);
-  assert.equal(output[0].energy, 1);
-  assert.equal(output[0].standalone_score, 0);
-  assert.equal(output[0].novelty_score, 0);
+  assert.deepEqual(
+    [output[0].energy, output[0].standalone_score, output[0].novelty_score],
+    [0.7, 0.8, 0.9],
+  );
+});
+
+test('segmentStrength ranks normalized 0.7, 0.8, and 0.9 scores correctly', () => {
+  const lower = segment({ energy: 0.7, standalone_score: 0.7, novelty_score: 0.7 });
+  const higher = segment({ energy: 0.9, standalone_score: 0.8, novelty_score: 0.7 });
+
+  assert.ok(segmentStrength(higher) > segmentStrength(lower));
+  assert.equal(segmentStrength(higher), 3.55);
+});
+
+test('normalization emits a warning with the raw and normalized score distribution', () => {
+  const warnings: AnalystWarning[] = [];
+  normalizeSegments(
+    [proposedSegment({ energy: 7, standalone_score: 8, novelty_score: 9 })],
+    words(120),
+    { onWarning: (warning) => warnings.push(warning) },
+  );
+
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].kind, 'score_scale_normalized');
+  assert.equal(warnings[0].message.includes('1..10'), true);
+  assert.deepEqual(warnings[0].data, {
+    pass: 'final',
+    raw_scores: [7, 8, 9],
+    normalized_scores: [0.7, 0.8, 0.9],
+  });
+});
+
+test('uniform surviving segments emit a saturation diagnostic without failing', () => {
+  const warnings: AnalystWarning[] = [];
+  const output = normalizeSegments(
+    [
+      proposedSegment({ start_time: 0, end_time: 60, topic: 'first' }),
+      proposedSegment({ start_time: 100, end_time: 160, topic: 'second' }),
+    ],
+    words(200),
+    { onWarning: (warning) => warnings.push(warning) },
+  );
+
+  assert.equal(output.length, 2);
+  const saturation = warnings.find((warning) => warning.kind === 'score_saturation');
+  assert.ok(saturation);
+  assert.deepEqual(saturation.data, {
+    segment_count: 2,
+    raw_distribution: [
+      { energy: 0.5, standalone_score: 0.5, novelty_score: 0.5 },
+      { energy: 0.5, standalone_score: 0.5, novelty_score: 0.5 },
+    ],
+  });
 });
 
 test('normalizeSegments caps the pool by strength, not by position', () => {

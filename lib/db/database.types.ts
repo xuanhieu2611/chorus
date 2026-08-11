@@ -194,7 +194,9 @@ export type Database = {
           campaign_id: string
           created_at: string
           decision: string
+          effective_decision: string
           id: string
+          model_decision: string
           problems: Json
           recommendations: Json
           scores: Json
@@ -204,7 +206,9 @@ export type Database = {
           campaign_id: string
           created_at?: string
           decision: string
+          effective_decision: string
           id?: string
+          model_decision: string
           problems?: Json
           recommendations?: Json
           scores: Json
@@ -214,7 +218,9 @@ export type Database = {
           campaign_id?: string
           created_at?: string
           decision?: string
+          effective_decision?: string
           id?: string
+          model_decision?: string
           problems?: Json
           recommendations?: Json
           scores?: Json
@@ -230,12 +236,46 @@ export type Database = {
           },
         ]
       }
+      campaign_transition_charges: {
+        Row: {
+          campaign_id: string
+          created_at: string
+          id: string
+          strategy_version: number
+          transition_kind: string
+        }
+        Insert: {
+          campaign_id: string
+          created_at?: string
+          id?: string
+          strategy_version: number
+          transition_kind: string
+        }
+        Update: {
+          campaign_id?: string
+          created_at?: string
+          id?: string
+          strategy_version?: number
+          transition_kind?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaign_transition_charges_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       campaigns: {
         Row: {
           audience: string | null
           brand_voice: string | null
           claimed_at: string | null
           claimed_by: string | null
+          completion_mode: string | null
+          completion_note: string | null
           cost_usd: number
           created_at: string
           credit_budget: number
@@ -248,7 +288,9 @@ export type Database = {
           id: string
           max_assets: number
           max_video_seconds: number
+          plan_revision_count: number
           platforms: string[]
+          portfolio_replan_count: number
           replan_count: number
           source_duration_sec: number | null
           source_path: string | null
@@ -261,6 +303,8 @@ export type Database = {
           brand_voice?: string | null
           claimed_at?: string | null
           claimed_by?: string | null
+          completion_mode?: string | null
+          completion_note?: string | null
           cost_usd?: number
           created_at?: string
           credit_budget?: number
@@ -273,7 +317,9 @@ export type Database = {
           id?: string
           max_assets?: number
           max_video_seconds?: number
+          plan_revision_count?: number
           platforms?: string[]
+          portfolio_replan_count?: number
           replan_count?: number
           source_duration_sec?: number | null
           source_path?: string | null
@@ -286,6 +332,8 @@ export type Database = {
           brand_voice?: string | null
           claimed_at?: string | null
           claimed_by?: string | null
+          completion_mode?: string | null
+          completion_note?: string | null
           cost_usd?: number
           created_at?: string
           credit_budget?: number
@@ -298,7 +346,9 @@ export type Database = {
           id?: string
           max_assets?: number
           max_video_seconds?: number
+          plan_revision_count?: number
           platforms?: string[]
+          portfolio_replan_count?: number
           replan_count?: number
           source_duration_sec?: number | null
           source_path?: string | null
@@ -311,33 +361,51 @@ export type Database = {
       reviews: {
         Row: {
           asset_id: string
+          blocking_feedback: string | null
           campaign_id: string
           created_at: string
           decision: string
           feedback: string
+          grounding_audit: Json
+          grounding_audit_passed: boolean
           id: string
+          materially_contradicted: boolean
+          polish_feedback: string | null
+          required_checks: Json
           reviewer_agent: string
           revision_index: number
           scores: Json
         }
         Insert: {
           asset_id: string
+          blocking_feedback?: string | null
           campaign_id: string
           created_at?: string
           decision: string
           feedback: string
+          grounding_audit?: Json
+          grounding_audit_passed?: boolean
           id?: string
+          materially_contradicted?: boolean
+          polish_feedback?: string | null
+          required_checks?: Json
           reviewer_agent?: string
           revision_index?: number
           scores: Json
         }
         Update: {
           asset_id?: string
+          blocking_feedback?: string | null
           campaign_id?: string
           created_at?: string
           decision?: string
           feedback?: string
+          grounding_audit?: Json
+          grounding_audit_passed?: boolean
           id?: string
+          materially_contradicted?: boolean
+          polish_feedback?: string | null
+          required_checks?: Json
           reviewer_agent?: string
           revision_index?: number
           scores?: Json
@@ -511,6 +579,21 @@ export type Database = {
         Returns: number
       }
       begin_asset_revision: { Args: { p_asset_id: string }; Returns: number }
+      charge_campaign_transition: {
+        Args: {
+          p_campaign_id: string
+          p_max_count: number
+          p_strategy_version: number
+          p_transition_kind: string
+        }
+        Returns: {
+          budget_exhausted: boolean
+          charged: boolean
+          plan_revision_count: number
+          portfolio_replan_count: number
+          transition_id: string
+        }[]
+      }
       claim_campaign: {
         Args: { p_stale_after_seconds?: number; p_worker: string }
         Returns: {
@@ -518,6 +601,8 @@ export type Database = {
           brand_voice: string | null
           claimed_at: string | null
           claimed_by: string | null
+          completion_mode: string | null
+          completion_note: string | null
           cost_usd: number
           created_at: string
           credit_budget: number
@@ -530,7 +615,9 @@ export type Database = {
           id: string
           max_assets: number
           max_video_seconds: number
+          plan_revision_count: number
           platforms: string[]
+          portfolio_replan_count: number
           replan_count: number
           source_duration_sec: number | null
           source_path: string | null

@@ -1,4 +1,3 @@
-import Link from 'next/link';
 import { CampaignMonitor } from '@/components/CampaignMonitor';
 
 /**
@@ -9,10 +8,7 @@ export default async function CampaignPage({ params }: PageProps<'/campaigns/[id
   const { id } = await params;
 
   return (
-    <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-8 px-6 py-12">
-      <Link href="/" className="text-muted-foreground hover:text-foreground w-fit text-sm">
-        ← New campaign
-      </Link>
+    <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 px-4 py-4 lg:h-dvh lg:flex-none lg:overflow-hidden xl:px-6">
       <CampaignMonitor campaignId={id} />
     </main>
   );

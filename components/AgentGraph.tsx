@@ -36,10 +36,11 @@ import type { CampaignSnapshot } from '@/components/useEventStream';
 interface AgentGraphProps {
   campaign: Pick<CampaignSnapshot, 'status' | 'current_node'>;
   events: CampaignEvent[];
+  compact?: boolean;
 }
 
-const NODE_WIDTH = 200;
-const NODE_HEIGHT = 78;
+const NODE_WIDTH = 216;
+const NODE_HEIGHT = 82;
 
 const SIDE_TO_POSITION: Record<GraphSide, Position> = {
   t: Position.Top,
@@ -75,6 +76,7 @@ type ChorusEdge = Edge<ChorusEdgeData, 'chorus'>;
  */
 const ChorusFlowNode = memo(function ChorusFlowNode({ data }: NodeProps<ChorusNode>) {
   const { label, subtitle, kind, state, visits, caption, agentLabel } = data;
+  const dotState = kind === 'gate' && state === 'active' ? 'gate' : state;
 
   return (
     <div
@@ -101,7 +103,7 @@ const ChorusFlowNode = memo(function ChorusFlowNode({ data }: NodeProps<ChorusNo
       ))}
 
       <div className="chorus-node__head">
-        <span className={`chorus-state-dot chorus-state-dot-${state}`} aria-hidden />
+        <span className={`chorus-state-dot chorus-state-dot-${dotState}`} aria-hidden />
         <span className="chorus-node__label">{label}</span>
         {visits > 1 && (
           <span className="chorus-node__visits" title={`Entered ${visits} times`}>
@@ -144,14 +146,14 @@ const ChorusFlowEdge = memo(function ChorusFlowEdge({
 
   const traversed = data?.traversed ?? false;
   const active = data?.active ?? false;
-  const state = active ? 'active' : traversed ? 'traversed' : 'idle';
+  const state = active ? 'active' : traversed && data?.loop ? 'looped' : traversed ? 'traversed' : 'idle';
 
   return (
     <>
       <BaseEdge id={id} path={path} className={`chorus-edge chorus-edge--${state}`} />
-      {active && (
+      {(active || (traversed && data?.loop)) && (
         <circle className="chorus-edge__token" r={4.5}>
-          <animateMotion dur="1.5s" repeatCount="indefinite" path={path} />
+          <animateMotion dur={active ? '1.8s' : '2.8s'} repeatCount="indefinite" path={path} />
         </circle>
       )}
       {data?.label && (
@@ -190,8 +192,8 @@ function FollowCamera({ activeNode, enabled }: { activeNode: string | null; enab
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     setCenter(definition.position.x + NODE_WIDTH / 2, definition.position.y + NODE_HEIGHT / 2, {
-      zoom: 0.92,
-      duration: reduceMotion ? 0 : 800,
+      zoom: 1.02,
+      duration: reduceMotion ? 0 : 720,
     });
   }, [activeNode, enabled, setCenter]);
 
@@ -204,7 +206,7 @@ function FollowCamera({ activeNode, enabled }: { activeNode: string | null; enab
   return null;
 }
 
-export function AgentGraph({ campaign, events }: AgentGraphProps) {
+export function AgentGraph({ campaign, events, compact = false }: AgentGraphProps) {
   const [follow, setFollow] = useState(true);
   const derived = useMemo(() => deriveGraphState(campaign, events), [campaign, events]);
 
@@ -267,13 +269,13 @@ export function AgentGraph({ campaign, events }: AgentGraphProps) {
   );
 
   return (
-    <Card className="overflow-hidden">
-      <CardHeader className="gap-2">
+    <Card className={compact ? 'demo-panel h-full min-h-0 gap-0 overflow-hidden py-0' : 'overflow-hidden'}>
+      <CardHeader className={compact ? 'border-b border-border px-4 py-3.5' : 'gap-2'}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
-            <CardTitle className="text-base">Agent graph</CardTitle>
-            <p className="text-muted-foreground mt-1 text-xs">
-              {derived.journey.length} node transition{derived.journey.length === 1 ? '' : 's'} ·{' '}
+            <CardTitle className={compact ? 'text-[15px]' : 'text-base'}>Campaign decision graph</CardTitle>
+            <p className={compact ? 'text-muted-foreground mt-0.5 text-[11px]' : 'text-muted-foreground mt-1 text-xs'}>
+              {derived.journey.length} node transition{derived.journey.length === 1 ? '' : 's'}, {' '}
               {events.length} event{events.length === 1 ? '' : 's'}
             </p>
           </div>
@@ -293,9 +295,9 @@ export function AgentGraph({ campaign, events }: AgentGraphProps) {
           </div>
         </div>
       </CardHeader>
-      <CardContent className="p-0">
+      <CardContent className={compact ? 'min-h-0 flex-1 p-0' : 'p-0'}>
         <div
-          className="chorus-flow bg-muted/15 h-[640px] w-full border-y"
+          className={compact ? 'chorus-flow bg-muted/20 h-full min-h-[420px] w-full' : 'chorus-flow bg-muted/15 h-[640px] w-full border-y'}
           aria-label="Campaign agent graph"
         >
           <ReactFlowProvider>
@@ -305,7 +307,7 @@ export function AgentGraph({ campaign, events }: AgentGraphProps) {
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               fitView
-              fitViewOptions={{ padding: 0.18, minZoom: 0.34, maxZoom: 0.95 }}
+              fitViewOptions={{ padding: 0.2, minZoom: 0.34, maxZoom: 1 }}
               minZoom={0.28}
               maxZoom={1.4}
               nodesDraggable={false}
@@ -325,7 +327,7 @@ export function AgentGraph({ campaign, events }: AgentGraphProps) {
           </ReactFlowProvider>
         </div>
       </CardContent>
-      <CardContent className="flex flex-col gap-4 pt-4">
+      {!compact && <CardContent className="flex flex-col gap-4 pt-4">
         <div className="flex flex-wrap gap-x-4 gap-y-2 text-[11px]" aria-label="Graph state legend">
           {(['idle', 'active', 'complete', 'failed'] as GraphNodeState[]).map((state) => (
             <span key={state} className="text-muted-foreground inline-flex items-center gap-1.5">
@@ -351,7 +353,7 @@ export function AgentGraph({ campaign, events }: AgentGraphProps) {
             );
           })}
         </div>
-      </CardContent>
+      </CardContent>}
     </Card>
   );
 }

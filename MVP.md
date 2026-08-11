@@ -124,7 +124,8 @@ FFPROBE_PATH=/opt/homebrew/opt/ffmpeg-full/bin/ffprobe
 
 # --- Guardrails ---
 MAX_REVISIONS_PER_ASSET=3
-MAX_CAMPAIGN_REPLANS=2
+MAX_PLAN_REVISIONS=2
+MAX_PORTFOLIO_REPLANS=2
 MAX_ASSETS=6
 DEFAULT_CREDIT_BUDGET=12
 CAMPAIGN_COST_CEILING_USD=3.00
@@ -234,7 +235,10 @@ create table public.campaigns (
                       'awaiting_strategy_approval','producing','critiquing',
                       'campaign_review','awaiting_final_approval','complete','failed','cancelled')),
   current_node        text,
-  replan_count        int not null default 0,
+  plan_revision_count     int not null default 0 check (plan_revision_count >= 0),
+  portfolio_replan_count  int not null default 0 check (portfolio_replan_count >= 0),
+  -- Retained for one compatibility release; runtime reads use the split counters.
+  replan_count            int not null default 0,
   error               text,
 
   claimed_at          timestamptz,
@@ -245,6 +249,19 @@ create table public.campaigns (
   updated_at          timestamptz not null default now()
 );
 create index campaigns_status_idx on public.campaigns (status, created_at);
+
+-- One row per paid graph transition. The unique key makes retries after a
+-- worker crash return the existing charge instead of incrementing twice.
+create table public.campaign_transition_charges (
+  id                uuid primary key default gen_random_uuid(),
+  campaign_id       uuid not null references public.campaigns(id) on delete cascade,
+  strategy_version  int not null check (strategy_version > 0),
+  transition_kind   text not null check (transition_kind in (
+    'director_replan','strategy_gate_replan','campaign_replan','final_gate_replan'
+  )),
+  created_at        timestamptz not null default now(),
+  unique (campaign_id, strategy_version, transition_kind)
+);
 
 -- ============ transcript ============
 create table public.transcripts (
@@ -325,6 +342,14 @@ create table public.reviews (
   campaign_id    uuid not null references public.campaigns(id) on delete cascade,
   reviewer_agent text not null default 'content_critic',
   scores         jsonb not null,  -- {hook,clarity,standalone,originality,audience_fit,payoff}
+  -- Explicit Phase 3 Critic contract. All four booleans must be true before PASS.
+  required_checks jsonb not null, -- {brief_compliant,source_supported,standalone,payoff_delivered}
+  blocking_feedback text,         -- only this field is sent into regeneration
+  polish_feedback text,           -- visible optional improvement, never a gate
+  materially_contradicted boolean not null default false,
+  grounding_audit jsonb not null default '[]', -- one {claim,supported,overstates_source,reason} row per submitted grounding claim
+  grounding_audit_passed boolean not null default false,
+  -- Compatibility field retained while older review rows age out.
   feedback       text not null,
   decision       text not null check (decision in ('PASS','REVISE','REJECT')),
   revision_index int  not null default 0,
@@ -411,11 +436,11 @@ flowchart TD
     analyze --> strategize[strategize<br/>CONTENT STRATEGIST]
     strategize --> dirplan{director_review_plan<br/>CONTENT DIRECTOR}
 
-    dirplan -->|REJECT, replans left| strategize
-    dirplan -->|REJECT, no replans left| finalize
+    dirplan -->|REJECT, plan revision left| strategize
+    dirplan -->|REJECT, plan budget exhausted| gate1
     dirplan -->|APPROVE| gate1[/await_strategy_approval<br/>HUMAN GATE/]
 
-    gate1 -->|Request changes| strategize
+    gate1 -->|Request changes, plan revision| strategize
     gate1 -->|Approve| produce[produce<br/>CLIP PRODUCER + WRITING AGENT<br/>one asset at a time]
 
     produce --> critique[critique<br/>CONTENT CRITIC]
@@ -432,13 +457,13 @@ flowchart TD
     more_assets -->|yes| produce
     more_assets -->|no| creview{campaign_review<br/>CAMPAIGN REVIEWER}
 
-    creview -->|REPLAN, under limit| replan[replan<br/>STRATEGIST revises plan]
-    creview -->|REPLAN, at limit| gate2
+    creview -->|REPLAN, portfolio replan left| replan[replan<br/>STRATEGIST revises plan]
+    creview -->|REPLAN, portfolio budget exhausted| gate2
     creview -->|APPROVE| gate2[/await_final_approval<br/>HUMAN GATE/]
 
     replan --> produce
 
-    gate2 -->|Request changes| replan
+    gate2 -->|Request changes, portfolio replan| replan
     gate2 -->|Approve| finalize[finalize<br/>package + zip]
     finalize --> DONE([Campaign complete])
 
@@ -584,9 +609,20 @@ Judges the plan against the objective, not the plan's internal coherence. The in
 const DirectorSchema = z.object({
   decision: z.enum(['APPROVE','REJECT']),
   reasoning: z.string(),
-  required_changes: z.array(z.string()),   // non-empty iff REJECT
+  required_changes: z.array(z.object({
+    plan_key: z.string().nullable(),
+    field: z.enum(['topic','purpose','platform','source_segments','portfolio_mix']),
+    instruction: z.string(),
+    target_platform: z.enum(['tiktok','x','linkedin']).nullable(),
+  })), // non-empty iff REJECT; code validates campaign relationships
 });
 ```
+
+The Director receives enabled platforms, valid asset type/platform pairs, asset,
+credit, and aggregate video-duration limits, plus an explicit statement that the
+plan already passed runtime validation. A schema-valid but impossible change gets
+one retry with the exact TypeScript violation; a second impossible response fails
+the node before either replan counter is charged.
 
 ### 7.4 Clip Producer
 
@@ -635,7 +671,7 @@ Be honest in the README about what "inspection" is: silence detection plus sampl
 
 **Model:** `MODEL_REASONING`. Receives verbatim source quotes for its segments, never a summary. The anti-hallucination rule from PRD section 14 needs enforcement, not just a prompt line:
 
-Every asset returns a `grounding` array mapping each factual claim to a source quote. Verify in code that each quoted string appears in the transcript (normalized whitespace and case). Any claim that fails verification triggers one regeneration with the failure named. This is cheap to build and it is a concrete, demonstrable correctness property.
+Every asset returns a `grounding` array mapping each factual claim to a source quote. Verify in code that each quoted string appears in the transcript (normalized whitespace and case). Any claim that fails verification triggers one regeneration with the failure named. The Critic also returns one structured semantic audit row for every grounding claim; missing, duplicate, extra, unsupported, or overstated rows fail closed and force `REVISE`. This keeps lexical quote matching and semantic support separately visible.
 
 ```ts
 const WrittenAssetSchema = z.object({
@@ -652,9 +688,9 @@ const WrittenAssetSchema = z.object({
 
 **Model:** `MODEL_REASONING`. Judges one asset in isolation. Deliberately **not** shown the campaign goal's other assets, so its judgment stays independent of the portfolio question the Campaign Reviewer owns.
 
-For video, it receives the transcript, the hook, and the inspection result. Scores 1 to 10 on hook, clarity, standalone, originality, audience_fit, payoff.
+For video, it receives the transcript, the hook, and the inspection result. Scores 1 to 10 on hook, clarity, standalone, originality, audience_fit, and payoff. It also returns four observable required checks: `brief_compliant`, `source_supported`, `standalone`, and `payoff_delivered`. Video review separately inspects the opening words, final spoken sentence, hook overlay, inspection result, and any end card. Written review audits every claim-to-quote pair and concrete example derived from it. Its required `grounding_audit` has one `{claim, supported, overstates_source, reason}` row for every submitted grounding claim; TypeScript verifies row identity and forces `source_supported = false` when the audit is incomplete, unsupported, or overstated.
 
-Decision thresholds are code, not prompt: `REJECT` if any score <= 3, `PASS` if mean >= 7 and no score < 5, otherwise `REVISE`. Deterministic thresholds mean the same scores always produce the same routing, which makes the demo reproducible. `REVISE` feedback must name a specific fix ("the strongest line lands 9 seconds in, start there"), not a judgment ("weak hook").
+Decision thresholds are code, not prompt: `REJECT` if any score <= 3 or the source is materially contradicted, `REVISE` if any required check is false, and `PASS` only if every check is true, mean >= 7, no score < 5, and `blocking_feedback` is null. The schema also separates `blocking_feedback` from optional `polish_feedback`; only blocking feedback enters regeneration. Deterministic thresholds mean the same review always produces the same routing, which makes the demo reproducible.
 
 ### 7.7 Campaign Reviewer
 
@@ -787,7 +823,7 @@ Two independent limiters, both enforced in code:
 
 **Real cost ceiling.** Every LLM call adds `cost_usd` to the campaign. Crossing `CAMPAIGN_COST_CEILING_USD` fails the run immediately. This is the protection against a loop bug quietly spending 40 dollars overnight. Build it in Phase 1, before any agent exists.
 
-Hard caps: 3 revisions per asset, 2 campaign replans, 6 final assets, 3 clip boundary adjustments. Every limit hit emits a `level:'warn'` event, because a visible "abandoning clip 3 after 3 failed reviews" line is better evidence of engineering judgment than a silent success.
+Hard caps: 3 revisions per asset, 2 plan revisions, 2 portfolio replans, 6 final assets, 3 clip boundary adjustments. Planning revisions and portfolio replans are independent counters. Every limit hit emits a `level:'warn'` event naming the exhausted budget.
 
 ---
 
@@ -803,7 +839,7 @@ Hard caps: 3 revisions per asset, 2 campaign replans, 6 final assets, 3 clip bou
 
 Use `@xyflow/react` with hardcoded node positions. No layout engine; the graph is fixed and known.
 
-**Approval gates** render inline as a blocking card. Strategy gate: Approve / Request changes with a free-text box that is fed back to the Strategist as `required_changes`.
+**Approval gates** render inline as a blocking card. Strategy gate: Approve / Request changes with a free-text box that is fed back to the Strategist. Director changes are structured as `{ plan_key, field, instruction, target_platform }` and checked against runtime constraints before a plan revision is charged.
 
 **`/campaigns/[id]/review`** - Final package. Video cards with an inline `<video>` player, hook, caption, quality score, and source timestamp. Written assets in platform-styled previews. Campaign scorecard. **Download campaign** hits `/api/export`, which zips clips plus a `campaign.md`.
 
@@ -848,7 +884,7 @@ Strategy generation with code-enforced budget validation. Director review with i
 
 **Built.** `lib/agents/strategist.ts`, `lib/agents/director.ts`, the versioned strategy tools, all three Phase 3 graph nodes, the approval route, and the dashboard strategy panel. Runtime validation owns fixed credit costs, the total budget, enabled platforms, stable plan keys, real segment ids, the asset cap, and the aggregate short-video duration. A schema-valid plan that breaks one of those relationships gets one retry with the exact violations.
 
-Paid decisions are resumable. A saved strategy with no revision request is reused after a crash, and the Director's successful `agent_runs.output` is the durable review record. Director and human rejections create a new strategy version; `replan_count` is advanced in code and capped before another model call. The gate route writes human feedback before requeueing and sets the resume node explicitly: approval goes to `produce`, while a change request goes to `strategize`. Merely setting `status = 'queued'` would re-enter the gate forever.
+Paid decisions are resumable. A saved strategy with no revision request is reused after a crash, and the Director's successful `agent_runs.output` is the durable review record. Director and first-gate changes charge `plan_revision_count`; Campaign Reviewer and final-gate changes charge `portfolio_replan_count`. A unique transition-charge row makes each charge idempotent across worker and route retries. The gate route writes human feedback before requeueing and sets the resume node explicitly: approval goes to `produce`, while a change request goes to `strategize` or `replan` as appropriate.
 
 ### Phase 4 - Writing Agent ✅
 Text assets end to end, with grounding verification. Asset cards.
@@ -872,7 +908,7 @@ Homebrew's regular `ffmpeg` bottle omits libass, so Phase 5 corrected the prereq
 Critic across both asset types. Threshold routing. Revision loop with a hard limit. `select_alternative` on `REJECT`. Asset abandonment.
 **Done:** you can watch a `REVISE` cause a regeneration that scores higher. This is the moment the project stops being a pipeline.
 
-**Built.** `lib/agents/critic.ts` scores each asset in isolation and returns actionable feedback; TypeScript maps those scores to PASS, REVISE, or REJECT. Production now handles one asset at a time, so a REVISE visibly returns to the producer with the Critic's feedback and a one-credit revision reservation. Three revision attempts are hard-capped in code, and a REJECT preserves the old row while the Strategist selects an unused segment for a suffixed replacement plan. Assets that exhaust either path are marked `abandoned` and remain excluded from the eventual package. Review rows and scorecards are visible on the dashboard, including the score progression across revisions.
+**Built.** `lib/agents/critic.ts` scores each asset in isolation, evaluates the four required checks, and returns separate blocking and optional polish feedback. TypeScript maps that contract to PASS, REVISE, or REJECT. Production now handles one asset at a time, so a REVISE visibly returns to the producer with only blocking feedback and a one-credit revision reservation. Three revision attempts are hard-capped in code, and a REJECT preserves the old row while the Strategist selects an unused segment for a suffixed replacement plan. Assets that exhaust either path are marked `abandoned` and remain excluded from the eventual package. Review rows and scorecards are visible on the dashboard, including hard-check status, optional polish, and score progression across revisions.
 
 ### Phase 7 - Campaign Reviewer and replan ✅
 Cross-asset review, forced replan under diversity 60, replacement asset generation, final approval gate.

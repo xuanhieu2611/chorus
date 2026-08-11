@@ -50,6 +50,16 @@ test('records loop-back traversal and the display-only asset decision', () => {
   assert.equal(state.traversedEdges.has(graphEdgeId('more_assets', 'produce')), true);
 });
 
+test('accepts a display-only decision event for narrated demo handoffs', () => {
+  const state = deriveGraphState(
+    { status: 'reviewing_campaign', current_node: 'campaign_review' },
+    [event(1, 'more_assets', 'Every planned asset is finished.', { next: 'campaign_review' })],
+  );
+
+  assert.equal(state.states.more_assets, 'complete');
+  assert.equal(state.activeEdge, graphEdgeId('more_assets', 'campaign_review'));
+});
+
 test('counts node entries so a fired loop is visible as a visit count', () => {
   const state = deriveGraphState({ status: 'producing', current_node: 'produce' }, [
     event(1, 'produce', 'Entering produce.'),

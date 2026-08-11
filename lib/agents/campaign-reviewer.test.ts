@@ -23,6 +23,8 @@ function review(overrides: Partial<CampaignReview> = {}): CampaignReview {
       plan_key: 'asset_1',
       replacement_topic: null,
       replacement_segment_ids: [],
+      replacement_reason: null,
+      prior_rejection_addressed: null,
     }],
     decision: 'APPROVE',
     ...overrides,
@@ -72,6 +74,8 @@ test('Campaign Reviewer keeps an explicit REPLAN above the diversity floor', () 
         plan_key: 'asset_1',
         replacement_topic: 'A different argument',
         replacement_segment_ids: ['unused-1'],
+        replacement_reason: 'The portfolio needs a distinct argument.',
+        prior_rejection_addressed: null,
       }],
     }),
   );
@@ -89,6 +93,8 @@ test('forced replans get a deterministic unused-segment replacement when the mod
     plan_key: 'asset_1',
     replacement_topic: 'A different argument',
     replacement_segment_ids: ['unused-1'],
+    replacement_reason: 'Deterministic repair after the Campaign Reviewer returned malformed replacement details.',
+    prior_rejection_addressed: null,
   });
 });
 
@@ -101,6 +107,8 @@ test('a replacement segment that would blow the video budget is dropped like a m
       replacement_topic: 'A different argument',
       // unused-1 spans 20s (20-40); only 5s remain in the video budget.
       replacement_segment_ids: ['unused-1'],
+      replacement_reason: 'The portfolio needs a distinct argument.',
+      prior_rejection_addressed: null,
     }],
   });
 
@@ -133,8 +141,8 @@ test('the fallback prefers a written asset over one that would blow the video bu
   const repaired = ensureReplanRecommendation(
     review({
       recommendations: [
-        { action: 'keep', plan_key: 'video_asset', replacement_topic: null, replacement_segment_ids: [] },
-        { action: 'keep', plan_key: 'text_asset', replacement_topic: null, replacement_segment_ids: [] },
+        { action: 'keep', plan_key: 'video_asset', replacement_topic: null, replacement_segment_ids: [], replacement_reason: null, prior_rejection_addressed: null },
+        { action: 'keep', plan_key: 'text_asset', replacement_topic: null, replacement_segment_ids: [], replacement_reason: null, prior_rejection_addressed: null },
       ],
     }),
     mixedAssets,
@@ -147,5 +155,130 @@ test('the fallback prefers a written asset over one that would blow the video bu
     plan_key: 'text_asset',
     replacement_topic: 'A different argument',
     replacement_segment_ids: ['unused-1'],
+    replacement_reason: 'Deterministic repair after the Campaign Reviewer returned malformed replacement details.',
+    prior_rejection_addressed: null,
   });
+});
+
+test('Campaign Reviewer does not reintroduce a topic rejected by the strategy', () => {
+  const rejectedTopic = 'A different argument';
+  const reviewWithHistory = {
+    ...review({
+      decision: 'REPLAN',
+      recommendations: [{
+        action: 'replace',
+        plan_key: 'asset_1',
+        replacement_topic: rejectedTopic,
+        replacement_segment_ids: ['rejected-1'],
+        replacement_reason: 'The current portfolio now needs this angle.',
+        prior_rejection_addressed: null,
+      }],
+    }),
+  };
+
+  assert.throws(
+    () => ensureReplanRecommendation(
+      reviewWithHistory,
+      assets,
+      [{ ...unusedSegments[0], id: 'rejected-1', topic: rejectedTopic }],
+      generousVideoBudget,
+      [{ topic: rejectedTopic, reason: 'Too close to the selected campaign angle.', segmentIds: ['rejected-1'] }],
+    ),
+    /not discarded/,
+  );
+});
+
+test('an exact rejected segment cannot return under a reframed topic without an override explanation', () => {
+  const contradictory = review({
+    decision: 'REPLAN',
+    recommendations: [{
+      action: 'replace',
+      plan_key: 'asset_1',
+      replacement_topic: 'A reframed argument',
+      replacement_segment_ids: ['rejected-1'],
+      replacement_reason: 'The portfolio needs a new angle.',
+      prior_rejection_addressed: null,
+    }],
+  });
+
+  assert.throws(
+    () => ensureReplanRecommendation(
+      contradictory,
+      assets,
+      [{ ...unusedSegments[0], id: 'rejected-1', topic: 'A reframed argument' }],
+      generousVideoBudget,
+      [{ topic: 'The original argument', reason: 'Too close to the selected angle.', segmentIds: ['rejected-1'] }],
+    ),
+    /prior rejection no longer applies/,
+  );
+});
+
+test('a justified reversal remains possible when the portfolio context changes', () => {
+  const justified = review({
+    decision: 'REPLAN',
+    recommendations: [{
+      action: 'replace',
+      plan_key: 'asset_1',
+      replacement_topic: 'A different argument',
+      replacement_segment_ids: ['rejected-1'],
+      replacement_reason: 'The current portfolio is repetitive, so this angle now fills a distinct job.',
+      prior_rejection_addressed: 'The earlier rejection avoided duplication, but the current portfolio failure is the duplication itself.',
+    }],
+  });
+
+  const result = ensureReplanRecommendation(
+    justified,
+    assets,
+    [{ ...unusedSegments[0], id: 'rejected-1' }],
+    generousVideoBudget,
+    [{ topic: 'A different argument', reason: 'Too close to the selected angle.', segmentIds: ['rejected-1'] }],
+  );
+
+  assert.equal(result.recommendations[0].prior_rejection_addressed?.startsWith('The earlier rejection'), true);
+});
+
+test('the caffeine recommendation must reconcile an anti-hype rejection', () => {
+  const antiHypeHistory = [{
+    topic: 'Caffeine as a productivity hack',
+    reason: 'The brief is anti-hype and rejects simplistic optimization claims.',
+    segmentIds: ['caffeine-1'],
+  }];
+  const recommendation = review({
+    decision: 'REPLAN',
+    recommendations: [{
+      action: 'replace',
+      plan_key: 'asset_1',
+      replacement_topic: 'Caffeine as a productivity hack',
+      replacement_segment_ids: ['caffeine-1'],
+      replacement_reason: 'The current portfolio needs this topic.',
+      prior_rejection_addressed: null,
+    }],
+  });
+
+  assert.throws(
+    () => ensureReplanRecommendation(
+      recommendation,
+      assets,
+      [{ ...unusedSegments[0], id: 'caffeine-1', topic: 'Caffeine as a productivity hack' }],
+      generousVideoBudget,
+      antiHypeHistory,
+    ),
+    /prior rejection no longer applies/,
+  );
+
+  const reconciled = ensureReplanRecommendation(
+    {
+      ...recommendation,
+      recommendations: [{
+        ...recommendation.recommendations[0],
+        replacement_reason: 'Use the caffeine moment to critique hype, not to promote a productivity hack.',
+        prior_rejection_addressed: 'The replacement explicitly critiques the anti-hype failure mode, so the earlier rejection no longer applies.',
+      }],
+    },
+    assets,
+    [{ ...unusedSegments[0], id: 'caffeine-1', topic: 'Caffeine as a productivity hack' }],
+    generousVideoBudget,
+    antiHypeHistory,
+  );
+  assert.equal(reconciled.recommendations[0].action, 'replace');
 });

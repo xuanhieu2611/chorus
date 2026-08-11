@@ -1,11 +1,15 @@
 import { db, type CampaignReviewRow, type ReviewRow } from '@/lib/db/client';
 import {
   CampaignReviewSchema,
+  decideCampaignReview,
+  normalizeCampaignReview,
   type CampaignReview,
 } from '@/lib/agents/campaign-reviewer';
 import {
   CriticSchema,
   type CriticDecision,
+  type GroundingAuditRow,
+  type CriticRequiredChecks,
   type CriticReview,
   type CriticScores,
 } from '@/lib/agents/critic';
@@ -20,7 +24,12 @@ import type { Json } from '@/lib/db/database.types';
 export interface RecordReviewInput {
   campaignId: string;
   scores: CriticScores;
-  feedback: string;
+  requiredChecks: CriticRequiredChecks;
+  blockingFeedback: string | null;
+  polishFeedback: string | null;
+  groundingAudit: GroundingAuditRow[];
+  groundingAuditPassed: boolean;
+  materiallyContradicted: boolean;
   decision: CriticDecision;
   revisionIndex: number;
 }
@@ -73,7 +82,7 @@ export async function getCampaignReviewRun(
   for (const run of data ?? []) {
     const input = objectOf(run.input);
     if (input?.strategy_version !== strategyVersion) continue;
-    const parsed = CampaignReviewSchema.safeParse(run.output);
+    const parsed = CampaignReviewSchema.safeParse(normalizeCampaignReview(run.output));
     if (parsed.success) {
       return { review: parsed.data, createdAt: run.finished_at ?? run.started_at };
     }
@@ -120,7 +129,9 @@ export async function recordCampaignReview(
   campaignId: string,
   version: number,
   review: CampaignReview,
+  modelDecision: CampaignReview['decision'] = review.decision,
 ): Promise<CampaignReviewRow> {
+  const effectiveDecision = decideCampaignReview(review).decision;
   const { data, error } = await db()
     .from('campaign_reviews')
     .upsert(
@@ -130,7 +141,11 @@ export async function recordCampaignReview(
         scores: review.scores as Json,
         problems: review.problems as Json,
         recommendations: review.recommendations as Json,
-        decision: review.decision,
+        // `decision` remains the compatibility field. New routing and
+        // approval code reads the explicit effective decision below.
+        decision: modelDecision,
+        model_decision: modelDecision,
+        effective_decision: effectiveDecision,
       },
       { onConflict: 'campaign_id,version' },
     )
@@ -139,6 +154,60 @@ export async function recordCampaignReview(
 
   if (error) throw new Error(`Failed to record Campaign Reviewer review: ${error.message}`);
   return data;
+}
+
+export interface FinalApprovalProvenance {
+  eventId: number;
+  reviewId: string;
+  reviewVersion: number;
+  effectiveDecision: 'APPROVE' | 'REPLAN';
+  completionMode: 'reviewer_approved' | 'human_override';
+  completionNote: string | null;
+}
+
+/** Read the durable final-gate approval intent for one Campaign Reviewer row. */
+export async function getFinalApprovalProvenance(
+  campaignId: string,
+  reviewId: string,
+): Promise<FinalApprovalProvenance | null> {
+  const { data, error } = await db()
+    .from('agent_events')
+    .select('id, data')
+    .eq('campaign_id', campaignId)
+    .eq('agent', 'human')
+    .eq('node', 'await_final_approval')
+    .order('id', { ascending: false })
+    .limit(50);
+
+  if (error) throw new Error(`Failed to read final approval provenance: ${error.message}`);
+
+  for (const event of data ?? []) {
+    const value = objectOf(event.data);
+    if (value?.final_approval_key !== `final-approval:${reviewId}`) continue;
+    if (
+      value.effective_decision !== 'APPROVE' &&
+      value.effective_decision !== 'REPLAN'
+    ) {
+      continue;
+    }
+    if (
+      value.completion_mode !== 'reviewer_approved' &&
+      value.completion_mode !== 'human_override'
+    ) {
+      continue;
+    }
+    const reviewVersion = value.review_version;
+    if (typeof reviewVersion !== 'number') continue;
+    return {
+      eventId: event.id,
+      reviewId,
+      reviewVersion,
+      effectiveDecision: value.effective_decision,
+      completionMode: value.completion_mode,
+      completionNote: typeof value.completion_note === 'string' ? value.completion_note : null,
+    };
+  }
+  return null;
 }
 
 export async function getFinalApprovalFeedback(
@@ -253,7 +322,7 @@ export async function recordReview(
     .maybeSingle();
 
   if (existingError) throw new Error(`Failed to check existing review: ${existingError.message}`);
-  if (existing) return existing;
+  if (existing && parseStoredCriticReview(existing)) return existing;
 
   const { data, error } = await db()
     .from('reviews')
@@ -263,7 +332,15 @@ export async function recordReview(
         campaign_id: input.campaignId,
         reviewer_agent: 'content_critic',
         scores: input.scores as Json,
-        feedback: input.feedback,
+        // `feedback` remains for one compatibility release. New consumers use
+        // the explicit fields below so polish can never enter regeneration.
+        feedback: input.blockingFeedback ?? input.polishFeedback ?? 'No additional Critic feedback.',
+        required_checks: input.requiredChecks as Json,
+        grounding_audit: input.groundingAudit as Json,
+        grounding_audit_passed: input.groundingAuditPassed,
+        blocking_feedback: input.blockingFeedback,
+        polish_feedback: input.polishFeedback,
+        materially_contradicted: input.materiallyContradicted,
         decision: input.decision,
         revision_index: input.revisionIndex,
       },
@@ -274,6 +351,18 @@ export async function recordReview(
 
   if (error) throw new Error(`Failed to record Critic review: ${error.message}`);
   return data;
+}
+
+function parseStoredCriticReview(row: ReviewRow): CriticReview | null {
+  const parsed = CriticSchema.safeParse({
+    scores: row.scores,
+    required_checks: row.required_checks,
+    grounding_audit: row.grounding_audit,
+    blocking_feedback: row.blocking_feedback,
+    polish_feedback: row.polish_feedback,
+    materially_contradicted: row.materially_contradicted,
+  });
+  return parsed.success ? parsed.data : null;
 }
 
 function objectOf(value: Json | null): Record<string, Json | undefined> | null {
