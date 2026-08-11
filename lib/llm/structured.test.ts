@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import { z } from 'zod';
 import { describeError } from './structured';
 import { extractCostUsd } from './budget';
+import { computeAnthropicCostUsd, priceFor } from './pricing';
+import { providerForModel } from './client';
 
 /**
  * Both behaviours here were broken in Phase 0 and both failed silently, which is
@@ -57,4 +59,45 @@ test('extractCostUsd returns null rather than inventing a zero', () => {
   assert.equal(extractCostUsd({}), null);
   assert.equal(extractCostUsd({ openrouter: {} }), null);
   assert.equal(extractCostUsd({ openrouter: { usage: { cost: 'free' } } }), null);
+});
+
+test('the model id alone decides the provider', () => {
+  // The whole routing rule. If this ever stops holding, cost resolution silently
+  // asks the wrong provider how much a call cost and records null forever.
+  assert.equal(providerForModel('claude-sonnet-5'), 'anthropic');
+  assert.equal(providerForModel('anthropic/claude-sonnet-4.5'), 'openrouter');
+  assert.equal(providerForModel('google/gemini-2.5-flash'), 'openrouter');
+});
+
+test('computeAnthropicCostUsd prices cache reads apart from fresh input', () => {
+  // Anthropic reports tokens, not dollars, and folds nothing together: a cache
+  // read is a tenth of the price of fresh input. Charging them at the same rate
+  // would overstate a cached campaign badly enough to trip the ceiling early.
+  const price = priceFor('claude-sonnet-5')!;
+  const cost = computeAnthropicCostUsd('claude-sonnet-5', {
+    anthropic: {
+      usage: {
+        input_tokens: 1_000_000,
+        output_tokens: 1_000_000,
+        cache_read_input_tokens: 1_000_000,
+        cache_creation_input_tokens: 1_000_000,
+      },
+    },
+  });
+  assert.equal(cost, price.input + price.output + price.cacheRead + price.cacheWrite);
+});
+
+test('computeAnthropicCostUsd treats absent token fields as zero, not as missing', () => {
+  const cost = computeAnthropicCostUsd('claude-sonnet-5', {
+    anthropic: { usage: { input_tokens: 1_000_000 } },
+  });
+  assert.equal(cost, priceFor('claude-sonnet-5')!.input);
+});
+
+test('computeAnthropicCostUsd returns null for an unpriced model or missing usage', () => {
+  // Same reasoning as the OpenRouter case: null is an undercount warning, a 0
+  // looks like a free call and holds the campaign total under the ceiling.
+  assert.equal(computeAnthropicCostUsd('claude-does-not-exist', { anthropic: { usage: {} } }), null);
+  assert.equal(computeAnthropicCostUsd('claude-sonnet-5', undefined), null);
+  assert.equal(computeAnthropicCostUsd('claude-sonnet-5', { openrouter: { cost: 1 } }), null);
 });

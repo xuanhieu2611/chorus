@@ -76,7 +76,8 @@ LLMs decide content and scores at nodes. TypeScript decides which edge is taken.
 ```
 node ──> agent ──> lib/tools/ ──> database / ffmpeg / storage
                         │
-                 lib/llm/structured.ts ──> OpenRouter
+                 lib/llm/structured.ts ──> Anthropic API   (bare model id)
+                                       └─> OpenRouter     (id with a slash)
 ```
 
 Agents call `lib/tools/` and nothing else. No agent file imports the Supabase client, and no agent file calls the AI SDK directly. Both rules exist so that every action an agent takes is logged to `agent_runs.tool_calls` and `agent_events` without anyone remembering to log it, which is what fills the live UI.
@@ -199,7 +200,13 @@ Two bugs in it were found by exercising it rather than by reading it, both worth
 - `campaigns.cost_usd` was `numeric(10,4)` per MVP section 5. A real call cost `$0.0000174` and rounded to `$0.0000`, so the total stayed at zero forever and the ceiling was unreachable. Now `numeric(12,6)`, matching `agent_runs.cost_usd` (migration `0004`).
 - `chargeCampaign` throws from *inside* `callStructured`'s try block, so `CostCeilingExceededError` was caught by the generic handler, treated as a schema failure, and **retried** — a runaway that spent more money on an already-overdrawn campaign, which is the exact failure the ceiling exists to prevent. It is now rethrown before any retry logic runs.
 
-**Model selection (MVP open item 3).** All three IDs verified against `https://openrouter.ai/api/v1/models` on 2026-08-09: `anthropic/claude-sonnet-4.5` ($3/$15 per Mtok), `google/gemini-2.5-flash` ($0.30/$2.50), both multimodal.
+**Model selection (MVP open item 3).** `google/gemini-2.5-flash` ($0.30/$2.50, multimodal) verified against `https://openrouter.ai/api/v1/models` on 2026-08-09.
+
+**Two providers, routed by the model id (Phase 10).** An id containing a slash is an OpenRouter route; a bare id goes to the Anthropic API directly through `@ai-sdk/anthropic`. That one rule is the whole of `providerForModel` in `lib/llm/client.ts`, and it means moving a role between providers is an `.env` edit.
+
+The reason is the spike finding below, not cost. Strict schema mode is not in effect through OpenRouter, so every agent's JSON came from a model that had merely been asked politely and the repair pass was a live path. Called directly, Claude enforces the schema server-side via `output_config.format`, so `MODEL_REASONING` and `MODEL_VISION` now default to `claude-sonnet-5` and the repair pass returns to being a safety net. The direct provider also drops the sampling parameters that Sonnet 5 and the other current Claude models reject outright, rather than forwarding them into a 400. `MODEL_FAST` stays on Gemini through OpenRouter: the Source Analyst's map pass reads a whole transcript and wants the million-token context and the cheap tokens more than it wants schema enforcement.
+
+**Cost accounting had to fork with it.** OpenRouter reports real dollars on the response; the Anthropic API reports tokens only. `lib/llm/pricing.ts` is therefore the hand-maintained price table that `docs` above says OpenRouter saved us from, and it exists because a ceiling that silently records null for most calls is not a ceiling. It prices cache reads separately from fresh input (a tenth of the rate) rather than trusting the AI SDK's normalised `usage`, which folds the two together. An unpriced model returns null, which is recorded as an undercount warning, never as $0. `resolveCostUsd` picks the branch from the model id, so `chargeCampaign` and everything above it never learn which provider ran the call.
 
 `MODEL_OVERRIDE_ALL` points every role at one model for development, currently `google/gemini-2.5-flash-lite` ($0.10/$0.40, 1M context, accepts images). It leaves `MODEL_REASONING`/`FAST`/`VISION` intact as the real configuration, so switching back for a demo is one commented line. **Anything set there must accept images**, or the Clip Producer's vision pass breaks on video sources. The worker prints the override at boot so it cannot silently degrade a demo, and `agent_runs.model` records the model per call.
 

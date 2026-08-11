@@ -33,6 +33,14 @@ export const env = {
   get openrouterApiKey() {
     return required('OPENROUTER_API_KEY');
   },
+  /**
+   * Only needed when a role points at a first-party Anthropic model id (one
+   * with no slash in it). Because the read is lazy, an all-OpenRouter
+   * configuration never touches this and never has to set it.
+   */
+  get anthropicApiKey() {
+    return required('ANTHROPIC_API_KEY');
+  },
   get groqApiKey() {
     return required('GROQ_API_KEY');
   },
@@ -59,14 +67,21 @@ export const env = {
     return value && value.trim() !== '' ? value.trim() : null;
   },
 
+  /*
+   * The provider is derived from the id, not configured separately: a slash
+   * means OpenRouter, a bare id means the Anthropic API directly. See
+   * `lib/llm/client.ts`. The defaults below therefore send judgement and vision
+   * straight to Anthropic (schema enforcement) and leave the Source Analyst's
+   * bulk map pass on a cheap million-token model through OpenRouter.
+   */
   get modelReasoning() {
-    return this.modelOverrideAll ?? process.env.MODEL_REASONING ?? 'anthropic/claude-sonnet-4.5';
+    return this.modelOverrideAll ?? process.env.MODEL_REASONING ?? 'claude-sonnet-5';
   },
   get modelFast() {
     return this.modelOverrideAll ?? process.env.MODEL_FAST ?? 'google/gemini-2.5-flash';
   },
   get modelVision() {
-    return this.modelOverrideAll ?? process.env.MODEL_VISION ?? 'anthropic/claude-sonnet-4.5';
+    return this.modelOverrideAll ?? process.env.MODEL_VISION ?? 'claude-sonnet-5';
   },
 
   get storageDir() {

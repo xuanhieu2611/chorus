@@ -4,7 +4,7 @@ Chorus turns one long-form podcast and a growth objective into a multi-platform 
 
 ## Local setup
 
-Chorus is intentionally local-only for v1. It needs Node 24, a Supabase project, OpenRouter, Groq, and an ffmpeg build with libass:
+Chorus is intentionally local-only for v1. It needs Node 24, a Supabase project, Anthropic and OpenRouter keys, Groq, and an ffmpeg build with libass:
 
 ```bash
 brew install ffmpeg-full
@@ -13,7 +13,7 @@ npm install
 cp .env.example .env.local
 ```
 
-Fill in `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The service role key is server-side only. Apply migrations to the linked Supabase project, then regenerate types:
+Fill in `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The service role key is server-side only. Both model keys are needed because the model id picks the provider: a bare id such as `claude-sonnet-5` goes to the Anthropic API directly (where Claude enforces the agent JSON schemas server-side), and an id with a slash such as `google/gemini-2.5-flash` is an OpenRouter route. Apply migrations to the linked Supabase project, then regenerate types:
 
 ```bash
 npm run db:push
@@ -79,7 +79,7 @@ Clip inspection is intentionally modest and honest: silence detection, sampled f
 
 ## Demo script
 
-Use a short local recording or a podcast with a known weak segment. The full external-service run requires valid OpenRouter, Groq, Supabase, media, and ffmpeg credentials, so this repository does not fabricate an end-to-end demo result.
+Use a short local recording or a podcast with a known weak segment. The full external-service run requires valid Anthropic, OpenRouter, Groq, Supabase, media, and ffmpeg credentials, so this repository does not fabricate an end-to-end demo result.
 
 1. Start `npm run dev` and `npm run worker`.
 2. Upload a video podcast, enter a growth objective, and build the campaign.
