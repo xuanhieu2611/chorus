@@ -41,6 +41,7 @@ export interface ClipProducerInput {
   segmentIds: string[];
   topic: string;
   purpose: string;
+  /** Remaining campaign-wide video allowance reserved for this asset. */
   maxVideoSeconds: number;
   sourceDurationSec: number;
   hasVideoStream: boolean;
@@ -207,7 +208,7 @@ async function chooseClipPlan(
       `Choose the strongest contiguous clip for ${input.planKey}.`,
       `Topic: ${input.topic}`,
       `Purpose: ${input.purpose}`,
-      `Maximum duration: ${input.maxVideoSeconds} seconds.`,
+      `Maximum duration for this asset: ${input.maxVideoSeconds} seconds from the campaign-wide combined video budget.`,
       'clip_start and clip_end must use the absolute source timestamps printed below and must stay inside one excerpt.',
       'Start as close as possible to the first line that earns attention. End after the payoff, not during the next setup.',
       'Write a hook of at most 90 characters for a three-second overlay and a platform caption of at most 2,200 characters.',

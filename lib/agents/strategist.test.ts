@@ -28,7 +28,12 @@ function segment(id: string, start: number, end: number): SegmentRow {
   };
 }
 
-const segments = [segment('s1', 0, 60), segment('s2', 100, 180), segment('s3', 200, 360)];
+const segments = [
+  segment('s1', 0, 60),
+  segment('s2', 100, 180),
+  segment('s3', 200, 360),
+  segment('s4', 400, 460),
+];
 
 function plan(overrides: Partial<StrategyPlan> = {}): StrategyPlan {
   return {
@@ -90,7 +95,7 @@ test('validateStrategy enforces fixed costs and the total credit budget in code'
   assert.ok(errors.some((error) => error.includes('above the 6 credit budget')));
 });
 
-test('validateStrategy rejects invented segments, wrong platforms, and oversized clips', () => {
+test('validateStrategy rejects invented segments and wrong platforms', () => {
   const invalid = plan({
     planned_assets: [
       {
@@ -109,7 +114,63 @@ test('validateStrategy rejects invented segments, wrong platforms, and oversized
   const errors = validateStrategy(invalid, segments, constraints);
   assert.ok(errors.some((error) => error.includes('must target tiktok')));
   assert.ok(errors.some((error) => error.includes('unknown segment invented')));
-  assert.ok(errors.some((error) => error.includes('above the 120 second clip limit')));
+});
+
+test('validateStrategy treats a long source segment as a bounded legal clip', () => {
+  const bounded = plan({
+    planned_assets: [
+      {
+        ...plan().planned_assets[0],
+        segment_ids: ['s3'],
+      },
+      plan().planned_assets[1],
+    ],
+  });
+
+  assert.deepEqual(validateStrategy(bounded, segments, constraints), []);
+});
+
+test('validateStrategy rejects videos that exceed the combined campaign budget', () => {
+  const invalid = plan({
+    planned_assets: [
+      plan().planned_assets[0],
+      {
+        ...plan().planned_assets[1],
+        plan_key: 'asset_2',
+        type: 'short_video',
+        platform: 'tiktok',
+        segment_ids: ['s2'],
+        credits: 3,
+      },
+    ],
+  });
+
+  const errors = validateStrategy(invalid, segments, constraints);
+  assert.ok(errors.some((error) => error.includes('140.0 seconds in total')));
+  assert.ok(errors.some((error) => error.includes('campaign-wide video budget')));
+});
+
+test('written assets do not consume the combined video budget', () => {
+  const mixed = plan({
+    planned_assets: [
+      {
+        ...plan().planned_assets[0],
+        segment_ids: ['s1'],
+      },
+      plan().planned_assets[1],
+      {
+        plan_key: 'asset_3',
+        type: 'x_thread',
+        platform: 'x',
+        topic: 'Topic three',
+        purpose: 'Share a lesson',
+        segment_ids: ['s3'],
+        credits: 2,
+      },
+    ],
+  });
+
+  assert.deepEqual(validateStrategy(mixed, segments, constraints), []);
 });
 
 test('validateStrategy rejects duplicate stable plan keys and campaign-disabled platforms', () => {
@@ -178,5 +239,65 @@ test('validateReplan preserves kept assets and requires a suffixed replacement k
       { ...valid, planned_assets: [plan().planned_assets[0], plan().planned_assets[1]] },
       input,
     ).some((error) => error.includes('must be removed')),
+  );
+});
+
+test('validateReplan rejects a replacement that breaks the combined video budget', () => {
+  const previous: StrategyPlan = {
+    ...plan(),
+    planned_assets: [
+      plan().planned_assets[0],
+      {
+        ...plan().planned_assets[0],
+        plan_key: 'asset_2',
+        segment_ids: ['s2'],
+      },
+    ],
+  };
+  const input = {
+    campaignId: 'campaign',
+    previous,
+    review: {
+      scores: {
+        asset_quality: 80,
+        diversity: 40,
+        audience_fit: 80,
+        brand_consistency: 80,
+        overall: 70,
+      },
+      problems: [{ issue: 'Repeated videos.', asset_plan_keys: ['asset_2'] }],
+      recommendations: [{
+        action: 'replace' as const,
+        plan_key: 'asset_2',
+        replacement_topic: 'A distinct topic',
+        replacement_segment_ids: ['s3'],
+      }],
+      decision: 'REPLAN' as const,
+    },
+    segments,
+    targetVersion: 2,
+    occupiedPlanKeys: ['asset_1', 'asset_2'],
+    goal: 'Grow the show',
+    audience: 'Builders',
+    brandVoice: 'Direct',
+    creditBudget: 12,
+    maxAssets: 6,
+    maxVideoSeconds: 120,
+    platforms: ['tiktok', 'x', 'linkedin'],
+  };
+  const revised: StrategyPlan = {
+    ...previous,
+    planned_assets: [
+      previous.planned_assets[0],
+      {
+        ...previous.planned_assets[1],
+        plan_key: 'asset_2_v2',
+        segment_ids: ['s3'],
+      },
+    ],
+  };
+
+  assert.ok(
+    validateReplan(revised, input).some((error) => error.includes('campaign-wide video budget')),
   );
 });

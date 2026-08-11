@@ -84,25 +84,30 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+/*
+ * A cool slate rather than a neutral grey. The graph sits on this canvas for
+ * minutes at a time, and a faint blue cast keeps the cyan "active" state
+ * reading as light rather than as a colour cast on a flat grey.
+ */
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: oklch(0.16 0.012 250);
+  --foreground: oklch(0.97 0.004 250);
+  --card: oklch(0.205 0.014 252);
+  --card-foreground: oklch(0.97 0.004 250);
+  --popover: oklch(0.205 0.014 252);
+  --popover-foreground: oklch(0.97 0.004 250);
+  --primary: oklch(0.93 0.006 250);
+  --primary-foreground: oklch(0.2 0.014 252);
+  --secondary: oklch(0.27 0.016 252);
+  --secondary-foreground: oklch(0.97 0.004 250);
+  --muted: oklch(0.26 0.014 252);
+  --muted-foreground: oklch(0.71 0.018 250);
+  --accent: oklch(0.28 0.018 252);
+  --accent-foreground: oklch(0.97 0.004 250);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --border: oklch(0.99 0.01 250 / 11%);
+  --input: oklch(0.99 0.01 250 / 15%);
+  --ring: oklch(0.6 0.04 250);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
@@ -130,11 +135,26 @@
   }
 }
 
+/*
+ * Agent graph. State colours are semantic rather than decorative: one hue per
+ * run state, used identically on nodes, edges, dots and the roster, so a glance
+ * at any surface reads the same way.
+ */
+:root {
+  --state-active: oklch(0.72 0.14 210);
+  --state-complete: oklch(0.68 0.15 155);
+  --state-gate: oklch(0.75 0.15 75);
+  --state-idle: var(--muted-foreground);
+}
+
+.dark {
+  --state-active: oklch(0.78 0.15 205);
+  --state-complete: oklch(0.75 0.16 155);
+  --state-gate: oklch(0.82 0.16 78);
+}
+
 .chorus-flow {
-  --xy-node-background-color-default: var(--background);
-  --xy-node-color-default: var(--foreground);
-  --xy-edge-stroke-default: color-mix(in oklch, var(--muted-foreground), transparent 45%);
-  --xy-background-color-default: color-mix(in oklch, var(--muted), transparent 45%);
+  --xy-background-color-default: transparent;
 }
 
 .chorus-flow .react-flow__node {
@@ -142,93 +162,179 @@
   padding: 0;
   background: transparent;
   box-shadow: none;
-}
-
-.chorus-graph-node {
-  min-height: 58px;
-  overflow: visible;
-  border: 1px solid var(--border) !important;
-  border-radius: 12px !important;
-  background: var(--background) !important;
-  color: var(--foreground);
-  box-shadow: 0 6px 16px color-mix(in oklch, var(--foreground), transparent 94%);
-}
-
-.chorus-graph-node-decision {
-  border-radius: 18px !important;
-}
-
-.chorus-graph-node-gate {
-  border-color: color-mix(in oklch, #f59e0b, var(--border) 45%) !important;
-}
-
-.chorus-graph-node-active {
-  border-color: #06b6d4 !important;
-  box-shadow: 0 0 0 3px color-mix(in oklch, #06b6d4, transparent 82%), 0 8px 24px color-mix(in oklch, #06b6d4, transparent 88%);
-  animation: chorus-node-pulse 1.8s ease-in-out infinite;
-}
-
-.chorus-graph-node-complete {
-  border-color: color-mix(in oklch, #22c55e, var(--border) 45%) !important;
-}
-
-.chorus-graph-node-failed {
-  border-color: var(--destructive) !important;
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--destructive), transparent 84%);
-}
-
-.chorus-graph-node-skipped {
-  opacity: 0.45;
-  border-style: dashed !important;
-}
-
-.chorus-graph-node-content {
-  display: flex;
-  min-height: 58px;
-  flex-direction: column;
-  justify-content: center;
-  gap: 2px;
-  padding: 9px 12px;
-  text-align: center;
-}
-
-.chorus-graph-node-title {
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 1.2;
-}
-
-.chorus-graph-node-subtitle {
-  color: var(--muted-foreground);
-  font-family: var(--font-geist-mono);
-  font-size: 9px;
-  line-height: 1.25;
-}
-
-.chorus-graph-node-state {
-  color: var(--muted-foreground);
-  font-family: var(--font-geist-mono);
-  font-size: 8px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  cursor: default;
 }
 
 .chorus-flow .react-flow__handle {
-  width: 5px;
-  height: 5px;
+  width: 1px;
+  height: 1px;
+  min-width: 1px;
+  min-height: 1px;
   border: 0;
-  background: var(--muted-foreground);
+  background: transparent;
+  opacity: 0;
 }
 
-.chorus-flow .react-flow__edge-text {
+/* Nodes */
+
+.chorus-node {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground), transparent 92%);
+  transition:
+    border-color 220ms ease,
+    box-shadow 220ms ease,
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.chorus-node--decision {
+  border-radius: 18px;
+}
+
+.chorus-node--start,
+.chorus-node--end {
+  border-radius: 999px;
+}
+
+.chorus-node--gate {
+  border-color: color-mix(in oklch, var(--state-gate), var(--border) 55%);
+  border-style: dashed;
+}
+
+.chorus-node--idle {
+  opacity: 0.62;
+}
+
+.chorus-node--complete {
+  border-color: color-mix(in oklch, var(--state-complete), var(--border) 40%);
+}
+
+.chorus-node--failed {
+  border-color: var(--destructive);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--destructive), transparent 86%);
+}
+
+.chorus-node--active {
+  border-color: var(--state-active);
+  transform: scale(1.03);
+  box-shadow:
+    0 0 0 1px var(--state-active),
+    0 0 22px color-mix(in oklch, var(--state-active), transparent 76%);
+  animation: chorus-node-breathe 2.4s ease-in-out infinite;
+}
+
+.chorus-node__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chorus-node__label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 620;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A node entered more than once means a revise or replan loop actually fired. */
+.chorus-node__visits {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--state-active), transparent 84%);
+  color: var(--state-active);
   font-family: var(--font-geist-mono);
   font-size: 9px;
+  font-weight: 600;
 }
 
-.chorus-flow .chorus-loop-edge .react-flow__edge-path {
-  stroke-dasharray: 7 5;
-  animation: chorus-loop-dash 1.1s linear infinite;
+.chorus-node__byline {
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 1.3;
 }
+
+.chorus-node__caption {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 2px;
+  padding-top: 5px;
+  border-top: 1px solid color-mix(in oklch, var(--state-active), transparent 82%);
+  color: color-mix(in oklch, var(--state-active), var(--foreground) 35%);
+  font-family: var(--font-geist-mono);
+  font-size: 9.5px;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+/* Edges */
+
+.chorus-edge {
+  fill: none;
+  stroke: color-mix(in oklch, var(--muted-foreground), transparent 68%);
+  stroke-width: 1.25;
+  transition:
+    stroke 260ms ease,
+    stroke-width 260ms ease;
+}
+
+.chorus-edge--traversed {
+  stroke: color-mix(in oklch, var(--state-complete), transparent 30%);
+  stroke-width: 1.75;
+}
+
+.chorus-edge--active {
+  stroke: var(--state-active);
+  stroke-width: 2.25;
+  filter: drop-shadow(0 0 5px color-mix(in oklch, var(--state-active), transparent 55%));
+}
+
+/* The handoff made visible: a token riding the edge the run just crossed. */
+.chorus-edge__token {
+  fill: var(--state-active);
+  filter: drop-shadow(0 0 6px var(--state-active));
+}
+
+.chorus-edge__label {
+  position: absolute;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-family: var(--font-geist-mono);
+  font-size: 9px;
+  line-height: 1.5;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.chorus-edge__label--idle {
+  opacity: 0.5;
+}
+
+.chorus-edge__label--traversed {
+  border-color: color-mix(in oklch, var(--state-complete), var(--border) 45%);
+  color: color-mix(in oklch, var(--state-complete), var(--foreground) 30%);
+}
+
+.chorus-edge__label--active {
+  border-color: var(--state-active);
+  color: var(--state-active);
+}
+
+/* Shared state dots and the agent roster */
 
 .chorus-state-dot {
   display: inline-block;
@@ -236,39 +342,106 @@
   height: 7px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: var(--muted-foreground);
+  background: var(--state-idle);
+  opacity: 0.5;
 }
 
 .chorus-state-dot-active {
-  background: #06b6d4;
-  box-shadow: 0 0 0 3px color-mix(in oklch, #06b6d4, transparent 82%);
+  background: var(--state-active);
+  opacity: 1;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--state-active), transparent 80%);
+  animation: chorus-dot-pulse 1.8s ease-in-out infinite;
 }
 
 .chorus-state-dot-complete {
-  background: #22c55e;
+  background: var(--state-complete);
+  opacity: 1;
 }
 
 .chorus-state-dot-failed {
   background: var(--destructive);
+  opacity: 1;
 }
 
-.chorus-state-dot-skipped {
-  background: var(--muted-foreground);
-  opacity: 0.45;
+.chorus-roster {
+  border-color: var(--border);
+  background: color-mix(in oklch, var(--muted), transparent 60%);
+  transition:
+    border-color 220ms ease,
+    background 220ms ease;
 }
 
-@keyframes chorus-node-pulse {
+.chorus-roster--idle {
+  opacity: 0.6;
+}
+
+.chorus-roster--active {
+  border-color: var(--state-active);
+  background: color-mix(in oklch, var(--state-active), transparent 90%);
+}
+
+.chorus-roster--failed {
+  border-color: var(--destructive);
+  background: color-mix(in oklch, var(--destructive), transparent 92%);
+}
+
+@keyframes chorus-node-breathe {
   0%,
   100% {
-    transform: translateZ(0);
+    box-shadow:
+      0 0 0 1px var(--state-active),
+      0 0 18px color-mix(in oklch, var(--state-active), transparent 80%);
   }
   50% {
-    transform: translateZ(0) scale(1.015);
+    box-shadow:
+      0 0 0 1px var(--state-active),
+      0 0 30px color-mix(in oklch, var(--state-active), transparent 62%);
   }
 }
 
-@keyframes chorus-loop-dash {
+@keyframes chorus-dot-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px color-mix(in oklch, var(--state-active), transparent 84%);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in oklch, var(--state-active), transparent 92%);
+  }
+}
+
+/* Timeline */
+
+.chorus-event--new {
+  animation: chorus-event-in 620ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes chorus-event-in {
+  from {
+    background: color-mix(in oklch, var(--state-active), transparent 88%);
+    opacity: 0;
+    transform: translateY(-6px);
+  }
   to {
-    stroke-dashoffset: -24;
+    background: transparent;
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chorus-node,
+  .chorus-node--active,
+  .chorus-state-dot-active,
+  .chorus-event--new {
+    animation: none;
+    transition: none;
+  }
+
+  .chorus-node--active {
+    transform: none;
+  }
+
+  .chorus-edge__token {
+    display: none;
   }
 }

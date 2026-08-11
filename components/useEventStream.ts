@@ -62,11 +62,25 @@ export interface EventStreamState {
   campaignReview: CampaignReviewView | null;
   assets: AssetView[];
   events: CampaignEvent[];
+  /**
+   * Ids that arrived over the live stream rather than in a snapshot backfill.
+   * Only the source can tell these apart, and the timeline needs to know so it
+   * flashes genuinely new activity instead of re-animating history.
+   */
+  liveEventIds: ReadonlySet<number>;
   cursor: number;
   status: EventStreamStatus;
   error: string | null;
   retry: () => void;
 }
+
+/** Enough recent ids to cover anything still on screen; the rest cannot re-animate. */
+const LIVE_ID_MEMORY = 100;
+
+/** Trailing delay used to collapse a burst of events into one snapshot fetch. */
+const SNAPSHOT_REFRESH_MS = 350;
+/** Backstop for a stream that stays open but stops delivering. */
+const SAFETY_POLL_MS = 15_000;
 
 const EMPTY_STATE: Omit<EventStreamState, 'retry'> = {
   campaign: null,
@@ -76,6 +90,7 @@ const EMPTY_STATE: Omit<EventStreamState, 'retry'> = {
   campaignReview: null,
   assets: [],
   events: [],
+  liveEventIds: new Set<number>(),
   cursor: 0,
   status: 'loading',
   error: null,
@@ -94,6 +109,7 @@ export function useEventStream(campaignId: string): EventStreamState {
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let reconnectAttempt = 0;
     let snapshotRequest = 0;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
     cursorRef.current = 0;
 
@@ -141,6 +157,22 @@ export function useEventStream(campaignId: string): EventStreamState {
       applySnapshot(payload);
     };
 
+    /**
+     * A node that emits ten tool events in a second must not trigger ten full
+     * snapshot fetches. Events already carry the timeline; the snapshot exists
+     * to refresh the rows around it (status, assets, strategy), so a trailing
+     * refresh per burst is enough and keeps the dashboard responsive.
+     */
+    const scheduleRefresh = () => {
+      if (disposed || refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = undefined;
+        void loadSnapshot(false).catch((error: unknown) => {
+          if (!disposed) setError(error);
+        });
+      }, SNAPSHOT_REFRESH_MS);
+    };
+
     const scheduleReconnect = () => {
       if (disposed || reconnectTimer) return;
       const delay = Math.min(8_000, 1_000 * 2 ** Math.min(reconnectAttempt, 3));
@@ -180,13 +212,12 @@ export function useEventStream(campaignId: string): EventStreamState {
         setState((current) => ({
           ...current,
           events: mergeEvents(current.events, [event]),
+          liveEventIds: rememberLiveId(current.liveEventIds, event.id),
           cursor: event.id,
           status: 'connected',
           error: null,
         }));
-        void loadSnapshot(false).catch((error: unknown) => {
-          if (!disposed) setError(error);
-        });
+        scheduleRefresh();
       };
 
       nextSource.onerror = () => {
@@ -214,10 +245,19 @@ export function useEventStream(campaignId: string): EventStreamState {
 
     void start();
 
+    // A proxy can hold an SSE connection open while delivering nothing, which
+    // never trips `onerror`. A slow snapshot poll means the worst case is a
+    // stale-by-seconds dashboard rather than one that looks frozen.
+    const safetyTimer = setInterval(() => {
+      void loadSnapshot(false).catch(() => {});
+    }, SAFETY_POLL_MS);
+
     return () => {
       disposed = true;
       source?.close();
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (refreshTimer) clearTimeout(refreshTimer);
+      clearInterval(safetyTimer);
     };
   }, [campaignId, retryKey]);
 
@@ -229,6 +269,11 @@ function attachReviews(assets: AssetView[], reviews: AssetReviewView[]): AssetVi
     ...asset,
     reviews: reviews.filter((review) => review.asset_id === asset.id),
   }));
+}
+
+function rememberLiveId(current: ReadonlySet<number>, id: number): ReadonlySet<number> {
+  const next = [...current, id];
+  return new Set(next.slice(-LIVE_ID_MEMORY));
 }
 
 function mergeEvents(current: CampaignEvent[], incoming: CampaignEvent[]): CampaignEvent[] {
@@ -245,9 +290,15 @@ function normalizeEvents(value: unknown): CampaignEvent[] {
   });
 }
 
+/**
+ * Accepts either a decoded row (snapshot backfill) or the raw `data:` line of an
+ * SSE frame, which arrives as a JSON *string*. Rejecting strings here silently
+ * dropped every live event and made the dashboard look like it needed a refresh.
+ */
 function parseEvent(value: unknown): CampaignEvent | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const candidate = value as Record<string, unknown>;
+  const decoded = typeof value === 'string' ? safeJsonParse(value) : value;
+  if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) return null;
+  const candidate = decoded as Record<string, unknown>;
   const id = typeof candidate.id === 'number' ? candidate.id : Number(candidate.id);
   if (!Number.isSafeInteger(id) || id < 0) return null;
   if (typeof candidate.agent !== 'string' || typeof candidate.message !== 'string') return null;
@@ -266,4 +317,12 @@ function parseEvent(value: unknown): CampaignEvent | null {
     data: candidate.data ?? null,
     created_at: typeof candidate.created_at === 'string' ? candidate.created_at : new Date(0).toISOString(),
   };
+}
+
+function safeJsonParse(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }

@@ -6,6 +6,7 @@ import { db } from '@/lib/db/client';
 import {
   buildCampaignExportManifest,
   exportAssetProblems,
+  exportVideoBudgetProblem,
   safeFilename,
   selectExportAssets,
 } from '@/lib/export';
@@ -57,6 +58,9 @@ export async function GET(
     exportAssetProblems(asset).map((problem) => `${asset.plan_key}: ${problem}`),
   );
   if (problems.length > 0) return jsonError(`The final package is incomplete: ${problems.join('; ')}`, 422);
+
+  const videoBudgetProblem = exportVideoBudgetProblem(campaignResult.data, selectedAssets);
+  if (videoBudgetProblem) return jsonError(`The final package exceeds its campaign-wide video budget: ${videoBudgetProblem}`, 422);
 
   const manifest = buildCampaignExportManifest({
     campaign: campaignResult.data,

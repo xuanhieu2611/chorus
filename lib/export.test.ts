@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCampaignExportManifest, safeFilename, selectExportAssets } from '@/lib/export';
+import {
+  buildCampaignExportManifest,
+  exportVideoBudgetProblem,
+  safeFilename,
+  selectExportAssets,
+} from '@/lib/export';
 import type { AssetRow, CampaignRow } from '@/lib/db/client';
 
 function asset(overrides: Partial<AssetRow>): AssetRow {
@@ -62,6 +67,21 @@ test('export selection excludes every non-passed asset status', () => {
   ]);
 
   assert.deepEqual(selected.map((item) => item.id), ['passed']);
+});
+
+test('final export budget accepts an exact cap and rejects an over-budget portfolio', () => {
+  const videos = [
+    asset({ type: 'short_video', platform: 'tiktok', duration_sec: 70, media_path: 'clips/a.mp4' }),
+    asset({ type: 'short_video', platform: 'tiktok', duration_sec: 50, media_path: 'clips/b.mp4' }),
+  ];
+  assert.equal(exportVideoBudgetProblem(campaign(), videos), null);
+  assert.match(
+    exportVideoBudgetProblem(campaign(), [
+      ...videos,
+      asset({ type: 'short_video', platform: 'tiktok', duration_sec: 0.01, media_path: 'clips/c.mp4' }),
+    ]) ?? '',
+    /120\.01/,
+  );
 });
 
 test('export manifest uses safe, stable entry names and campaign summary', () => {

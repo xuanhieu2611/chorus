@@ -7,11 +7,12 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { AssetCard } from '@/components/AssetCard';
 import { CampaignReviewCard } from '@/components/CampaignReviewCard';
 import { RetryCampaignButton } from '@/components/RetryCampaignButton';
+import { StrategyPanel } from '@/components/StrategyPanel';
 import { useEventStream } from '@/components/useEventStream';
 
 export function CampaignReview({ campaignId }: { campaignId: string }) {
   const stream = useEventStream(campaignId);
-  const { campaign, campaignReview, assets, segments } = stream;
+  const { campaign, campaignReview, strategy, assets, segments } = stream;
 
   if (!campaign) {
     return (
@@ -71,6 +72,25 @@ export function CampaignReview({ campaignId }: { campaignId: string }) {
           </CardContent>
         </Card>
       )}
+
+      {strategy ? (
+        <StrategyPanel
+          campaignId={campaignId}
+          strategy={strategy}
+          awaitingApproval={false}
+        />
+      ) : campaign.status === 'complete' ? (
+        <Card className="border-amber-500/30 bg-amber-500/5">
+          <CardHeader>
+            <CardTitle className="text-base">Strategy snapshot unavailable</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-muted-foreground text-sm">
+              This campaign completed without a saved strategy snapshot. The final scorecard and passed assets remain available below.
+            </p>
+          </CardContent>
+        </Card>
+      ) : null}
 
       {campaignReview && <CampaignReviewCard review={campaignReview} />}
 

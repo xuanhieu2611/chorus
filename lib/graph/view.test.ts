@@ -50,6 +50,52 @@ test('records loop-back traversal and the display-only asset decision', () => {
   assert.equal(state.traversedEdges.has(graphEdgeId('more_assets', 'produce')), true);
 });
 
+test('counts node entries so a fired loop is visible as a visit count', () => {
+  const state = deriveGraphState({ status: 'producing', current_node: 'produce' }, [
+    event(1, 'produce', 'Entering produce.'),
+    event(2, 'produce', 'Rendered clip 1.'),
+    event(3, 'critique', 'Entering critique.'),
+    event(4, 'produce', 'Entering produce.'),
+  ]);
+
+  assert.equal(state.meta.produce.visits, 2);
+  assert.equal(state.meta.critique.visits, 1);
+  assert.equal(state.meta.strategize, undefined);
+});
+
+test('the node caption is the latest thing said there, not the entry line', () => {
+  const state = deriveGraphState({ status: 'producing', current_node: 'produce' }, [
+    event(1, 'produce', 'Entering produce.'),
+    event(2, 'produce', 'Rendered clip 2 of 5.'),
+  ]);
+
+  assert.equal(state.meta.produce.lastMessage, 'Rendered clip 2 of 5.');
+  assert.equal(state.activeNode, 'produce');
+});
+
+test('activeEdge is the most recent crossing, so only one token is in flight', () => {
+  const state = deriveGraphState({ status: 'strategizing', current_node: 'strategize' }, [
+    event(1, 'analyze', 'Analysis done.', { next: 'strategize' }),
+    event(2, 'strategize', 'Plan drafted.', { next: 'director_review_plan' }),
+  ]);
+
+  assert.equal(state.activeEdge, graphEdgeId('strategize', 'director_review_plan'));
+  assert.equal(state.traversedEdges.has(graphEdgeId('analyze', 'strategize')), true);
+});
+
+test('the journey records one step per node entry, in order', () => {
+  const state = deriveGraphState({ status: 'producing', current_node: 'produce' }, [
+    event(1, 'ingest', 'Entering ingest.'),
+    event(2, 'ingest', 'Probed the source.'),
+    event(3, 'transcribe', 'Entering transcribe.'),
+  ]);
+
+  assert.deepEqual(
+    state.journey.map((step) => step.node),
+    ['ingest', 'transcribe'],
+  );
+});
+
 test('marks finalized work complete in its terminal node and failed work as failed', () => {
   const finalized = deriveGraphState({ status: 'complete', current_node: 'finalize' }, [
     event(1, 'finalize', 'Entering finalize.'),

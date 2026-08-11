@@ -3,6 +3,13 @@ import { callStructured } from '@/lib/llm/structured';
 import type { Json } from '@/lib/db/database.types';
 import type { SegmentRow } from '@/lib/db/client';
 import type { CampaignReview } from '@/lib/agents/campaign-reviewer';
+import {
+  plannedVideoDuration,
+  plannedVideoDurationForAsset,
+  remainingVideoBudget,
+  sourceSpanDuration,
+  type BudgetAsset,
+} from '@/lib/video-budget';
 
 export const ASSET_TYPES = ['short_video', 'x_thread', 'linkedin_post'] as const;
 export const PLATFORMS = ['tiktok', 'x', 'linkedin'] as const;
@@ -34,6 +41,8 @@ export interface ReplanInput extends StrategyConstraints {
   targetVersion: number;
   occupiedPlanKeys: string[];
   humanFeedback?: string;
+  /** Existing rows let replans preserve measured durations for kept assets. */
+  existingAssets?: BudgetAsset[];
   goal: string;
   audience: string | null;
   brandVoice: string | null;
@@ -53,6 +62,8 @@ export interface AlternativeInput {
   rejectionFeedback: string;
   assetType: PlannedAsset['type'];
   candidates: SegmentRow[];
+  /** Remaining aggregate allowance, supplied for video replacements. */
+  remainingVideoSeconds?: number;
   goal: string;
   audience: string | null;
   brandVoice: string | null;
@@ -104,6 +115,7 @@ export async function replanStrategy(input: ReplanInput): Promise<StrategyPlan> 
       (asset) =>
         `- Keep ${asset.plan_key} exactly: type ${asset.type}, platform ${asset.platform}, source segment ids ${asset.segment_ids.join(', ')}.`,
     );
+  const replacementCapacityInstructions = renderReplacementCapacity(input, replacementKeys);
 
   let violations: string[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -119,9 +131,13 @@ export async function replanStrategy(input: ReplanInput): Promise<StrategyPlan> 
       prompt: [
         `Revise strategy v${input.targetVersion - 1} into strategy v${input.targetVersion}.`,
         'The Campaign Reviewer found a portfolio-level problem. Replace only the named assets and preserve every other asset exactly so already-produced work remains reusable.',
+        `The maximum combined duration of all short videos remains ${input.maxVideoSeconds} seconds. The complete revised plan must fit it; written assets consume none of this allowance.`,
         '',
         'Required replacements:',
         ...replacementInstructions,
+        ...(replacementCapacityInstructions.length
+          ? ['', 'Replacement video capacity after kept assets:', ...replacementCapacityInstructions]
+          : []),
         '',
         'Assets that must remain unchanged:',
         ...keepInstructions,
@@ -150,9 +166,11 @@ export async function replanStrategy(input: ReplanInput): Promise<StrategyPlan> 
         from_strategy_version: input.targetVersion - 1,
         target_strategy_version: input.targetVersion,
         replacement_keys: Object.fromEntries(replacementKeys),
+        max_video_seconds: input.maxVideoSeconds,
         previous_plan: input.previous,
         campaign_review: input.review,
         human_feedback: input.humanFeedback ?? null,
+        replacement_video_capacity: replacementCapacityInstructions,
       } as Json,
     });
 
@@ -229,6 +247,13 @@ export function validateReplan(plan: StrategyPlan, input: ReplanInput): string[]
     }
   }
 
+  const capacity = replacementVideoCapacity(input, replacementKeys, plan);
+  if (capacity.replacementVideoSeconds > capacity.remainingVideoSeconds + 0.000001) {
+    violations.push(
+      `video replacements require ${capacity.replacementVideoSeconds.toFixed(1)} seconds, but only ${capacity.remainingVideoSeconds.toFixed(1)} seconds remain after kept assets`,
+    );
+  }
+
   return violations;
 }
 
@@ -266,6 +291,64 @@ function replacementKeysFor(input: ReplanInput): Map<string, string> {
     occupied.add(replacement);
   }
   return keys;
+}
+
+function renderReplacementCapacity(
+  input: ReplanInput,
+  replacementKeys: Map<string, string>,
+): string[] {
+  const replacementPlan: StrategyPlan = {
+    ...input.previous,
+    planned_assets: input.previous.planned_assets.map((asset) => {
+      const replacementKey = replacementKeys.get(asset.plan_key);
+      const recommendation = input.review.recommendations.find(
+        (item) => item.action === 'replace' && item.plan_key === asset.plan_key,
+      );
+      return replacementKey && recommendation
+        ? { ...asset, plan_key: replacementKey, segment_ids: recommendation.replacement_segment_ids }
+        : asset;
+    }),
+  };
+  const capacity = replacementVideoCapacity(input, replacementKeys, replacementPlan);
+  if (capacity.replacementVideoSeconds === 0) return [];
+
+  let remaining = capacity.remainingVideoSeconds;
+  return input.previous.planned_assets.flatMap((asset) => {
+    const replacementKey = replacementKeys.get(asset.plan_key);
+    if (!replacementKey || asset.type !== 'short_video') return [];
+    const replacement = replacementPlan.planned_assets.find((item) => item.plan_key === replacementKey);
+    const duration = replacement
+      ? plannedVideoDurationForAsset(replacement, input.segments, input.maxVideoSeconds)
+      : 0;
+    const allowance = Math.max(0, remaining);
+    remaining -= duration;
+    return [
+      `- ${replacementKey}: ${duration.toFixed(1)} seconds planned; at most ${allowance.toFixed(1)} seconds remain before this replacement.`,
+    ];
+  });
+}
+
+function replacementVideoCapacity(
+  input: ReplanInput,
+  replacementKeys: Map<string, string>,
+  plan: StrategyPlan,
+): { remainingVideoSeconds: number; replacementVideoSeconds: number } {
+  const keptAssets = input.previous.planned_assets.filter((asset) => !replacementKeys.has(asset.plan_key));
+  const remainingVideoSeconds = remainingVideoBudget({
+    maxVideoSeconds: input.maxVideoSeconds,
+    plannedAssets: keptAssets,
+    segments: input.segments,
+    assets: input.existingAssets ?? [],
+  });
+  const replacementVideoSeconds = input.previous.planned_assets.reduce((total, previous) => {
+    const replacementKey = replacementKeys.get(previous.plan_key);
+    if (!replacementKey) return total;
+    const replacement = plan.planned_assets.find((asset) => asset.plan_key === replacementKey);
+    return replacement
+      ? total + plannedVideoDurationForAsset(replacement, input.segments, input.maxVideoSeconds)
+      : total;
+  }, 0);
+  return { remainingVideoSeconds, replacementVideoSeconds };
 }
 
 function normalizeReplan(plan: StrategyPlan, input: ReplanInput): StrategyPlan {
@@ -307,8 +390,8 @@ function sameIds(left: string[], right: string[]): boolean {
  * campaign. TypeScript decides whether the proposed plan is legal.
  *
  * Semantic validation is deliberately outside Zod. Budget sums, segment
- * membership, and clip duration are relationships between the output and the
- * campaign, not properties of one JSON field. A failed plan is sent back once
+ * membership, and aggregate video duration are relationships between the output
+ * and the campaign, not properties of one JSON field. A failed plan is sent back once
  * with the exact violations instead of trusting a prompt to do arithmetic.
  */
 export async function createStrategy(input: StrategistInput): Promise<StrategyPlan> {
@@ -344,9 +427,10 @@ export async function createStrategy(input: StrategistInput): Promise<StrategyPl
         `- Platforms: ${input.platforms.join(', ')}`,
         `- Credit budget: ${input.creditBudget}`,
         `- Maximum assets: ${input.maxAssets}`,
-        `- Maximum duration of each short video: ${input.maxVideoSeconds} seconds`,
+        `- Maximum combined duration of all short videos: ${input.maxVideoSeconds} seconds`,
         '- Costs are fixed: short_video = 3, x_thread = 2, linkedin_post = 2 credits.',
-        `- Return between 2 and ${safeAssetCount} assets. This conservative cap guarantees the plan fits even if every asset is a video. Do not fill the campaign maximum.`,
+        `- Return between 2 and ${safeAssetCount} assets. This conservative cap guarantees the plan fits the credit budget even if every asset is a video. Do not fill the campaign maximum.`,
+        '- Estimate each video from its selected source span, bound any longer span to a legal clip, and keep the combined video estimate within the shared allowance. Written assets consume none of it.',
         `- Legal asset-count combinations for this budget: ${budgetOptions}`,
         '- Count your proposed asset types against one of those combinations before returning the plan.',
         '- A short_video must target tiktok, an x_thread must target x, and a linkedin_post must target linkedin.',
@@ -411,6 +495,9 @@ export async function selectAlternative(input: AlternativeInput): Promise<Altern
         `Why the Critic rejected it: ${input.rejectionFeedback}`,
         '',
         'Choose exactly one segment from this unused pool. The replacement should do the same platform job with a distinctly stronger source moment. Return the segment id exactly as shown.',
+        ...(input.assetType === 'short_video' && input.remainingVideoSeconds !== undefined
+          ? [`The replacement must fit within ${input.remainingVideoSeconds.toFixed(2)} seconds remaining in the campaign-wide video budget.`]
+          : []),
         ...input.candidates.map((segment) => renderAlternativeCandidate(segment)),
         ...(violations.length
           ? [
@@ -428,6 +515,7 @@ export async function selectAlternative(input: AlternativeInput): Promise<Altern
         rejected_topic: input.rejectedTopic,
         rejection_feedback: input.rejectionFeedback,
         asset_type: input.assetType,
+        remaining_video_seconds: input.remainingVideoSeconds ?? null,
         candidate_ids: input.candidates.map((segment) => segment.id),
         selection_attempt: attempt + 1,
       } as Json,
@@ -454,6 +542,7 @@ export function validateStrategy(
   const segmentById = new Map(segments.map((segment) => [segment.id, segment]));
   const planKeys = new Set<string>();
   let credits = 0;
+  let plannedVideoSeconds = 0;
 
   if (strategy.planned_assets.length > constraints.maxAssets) {
     violations.push(
@@ -487,26 +576,29 @@ export function validateStrategy(
       violations.push(`${label} repeats a source segment id`);
     }
 
-    const sourceSegments = asset.segment_ids.flatMap((id) => {
+    const sourceSegments = asset.segment_ids.map((id) => {
       const segment = segmentById.get(id);
-      if (!segment) {
-        violations.push(`${label} references unknown segment ${id}`);
-        return [];
-      }
-      return [segment];
+      if (!segment) violations.push(`${label} references unknown segment ${id}`);
+      return segment ?? null;
     });
 
     if (asset.type === 'short_video') {
-      const duration = sourceSegments.reduce(
-        (total, segment) => total + (Number(segment.end_time) - Number(segment.start_time)),
-        0,
-      );
-      if (duration > constraints.maxVideoSeconds) {
-        violations.push(
-          `${label} uses ${duration.toFixed(1)} seconds of source, above the ${constraints.maxVideoSeconds} second clip limit`,
-        );
+      const sourceDurations = sourceSegments.map((segment) => (segment ? sourceSpanDuration(segment) : 0));
+      for (const [sourceIndex, duration] of sourceDurations.entries()) {
+        if (duration <= 0) {
+          violations.push(
+            `${label} references source segment ${asset.segment_ids[sourceIndex]} with no usable time span`,
+          );
+        }
       }
+      plannedVideoSeconds += plannedVideoDuration(sourceDurations, constraints.maxVideoSeconds);
     }
+  }
+
+  if (plannedVideoSeconds > constraints.maxVideoSeconds) {
+    violations.push(
+      `planned short videos use ${plannedVideoSeconds.toFixed(1)} seconds in total, above the ${constraints.maxVideoSeconds} second campaign-wide video budget`,
+    );
   }
 
   if (credits > constraints.creditBudget) {
@@ -564,7 +656,7 @@ function renderSegments(segments: SegmentRow[], maxVideoSeconds: number): string
       return [
         `# ${segment.id}`,
         `  ${Number(segment.start_time).toFixed(1)}-${Number(segment.end_time).toFixed(1)}s (${duration.toFixed(1)}s) | ${segment.content_type} | ${scores}`,
-        `  video eligible: ${duration <= maxVideoSeconds ? 'yes' : `no, exceeds ${maxVideoSeconds}s`}`,
+        `  video eligible: ${duration > 0 ? (duration > maxVideoSeconds ? `yes, Clip Producer can bound it to ${maxVideoSeconds}s` : 'yes') : 'no, invalid time span'}`,
         `  topic: ${segment.topic}`,
         `  summary: ${(segment.summary ?? '').slice(0, 200)}`,
         hooks ? `  possible hooks: ${hooks}` : null,

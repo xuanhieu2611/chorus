@@ -37,50 +37,55 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            {campaign.title ?? 'Untitled campaign'}
-          </h1>
-          <Badge variant={statusVariant(campaign.status)}>{campaign.status.replace(/_/g, ' ')}</Badge>
-          {campaign.current_node && (
-            <span className="text-muted-foreground font-mono text-xs">{campaign.current_node}</span>
+      <header className="flex flex-col gap-5">
+        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+          <div className="flex min-w-0 flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="text-2xl font-semibold tracking-tight">
+                {campaign.title ?? 'Untitled campaign'}
+              </h1>
+              <Badge variant={statusVariant(campaign.status)} className="gap-1.5">
+                {isRunning(campaign.status) && (
+                  <span className="chorus-state-dot chorus-state-dot-active" />
+                )}
+                {campaign.status.replace(/_/g, ' ')}
+              </Badge>
+            </div>
+            <p className="text-muted-foreground max-w-[70ch] text-sm">{campaign.goal}</p>
+          </div>
+          {campaign.status === 'complete' && (
+            <Link
+              href={`/campaigns/${campaignId}/review`}
+              className="text-primary shrink-0 text-sm underline-offset-4 hover:underline"
+            >
+              Open final campaign review →
+            </Link>
           )}
         </div>
-        <p className="text-muted-foreground text-sm">{campaign.goal}</p>
-        {campaign.status === 'complete' && (
-          <Link href={`/campaigns/${campaignId}/review`} className="text-primary w-fit text-sm underline-offset-4 hover:underline">
-            Open final campaign review →
-          </Link>
-        )}
-      </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Source</CardTitle>
-        </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-          <Stat label="Duration" value={formatDuration(campaign.source_duration_sec)} />
+        <dl className="divide-border grid grid-cols-2 gap-px overflow-hidden rounded-xl border sm:grid-cols-4">
+          <Stat label="Source" value={formatDuration(campaign.source_duration_sec)} />
           <Stat
             label="Media"
             value={
               campaign.has_video_stream === null
-                ? '—'
+                ? 'probing'
                 : campaign.has_video_stream
-                  ? 'Video + audio'
-                  : 'Audio only'
+                  ? 'video + audio'
+                  : 'audio only'
             }
           />
           <Stat
             label="Transcript"
-            value={transcript ? `${transcript.word_count.toLocaleString('en-US')} words` : '—'}
+            value={transcript ? `${transcript.word_count.toLocaleString('en-US')} words` : 'pending'}
           />
           <Stat
             label="Spend"
-            value={`$${Number(campaign.cost_usd).toFixed(4)} · ${campaign.credits_spent}/${campaign.credit_budget} cr`}
+            value={`$${Number(campaign.cost_usd).toFixed(4)}`}
+            hint={`${campaign.credits_spent}/${campaign.credit_budget} credits`}
           />
-        </CardContent>
-      </Card>
+        </dl>
+      </header>
 
       {campaign.status === 'failed' ? (
         <Card className="border-destructive/40 bg-destructive/5">
@@ -111,6 +116,7 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
         <AgentGraph campaign={campaign} events={events} />
         <AgentTimeline
           events={events}
+          liveEventIds={stream.liveEventIds}
           connectionStatus={stream.status}
           connectionError={stream.error}
           onRetry={stream.retry}
@@ -226,13 +232,20 @@ export function CampaignMonitor({ campaignId }: { campaignId: string }) {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <div className="flex flex-col gap-1">
-      <span className="text-muted-foreground text-xs">{label}</span>
-      <span className="font-medium">{value}</span>
+    <div className="bg-card flex flex-col gap-1 px-4 py-3">
+      <dt className="text-muted-foreground text-[11px] tracking-wide uppercase">{label}</dt>
+      <dd className="flex flex-wrap items-baseline gap-2">
+        <span className="font-mono text-sm font-medium">{value}</span>
+        {hint && <span className="text-muted-foreground font-mono text-[10px]">{hint}</span>}
+      </dd>
     </div>
   );
+}
+
+function isRunning(status: string): boolean {
+  return !['complete', 'failed', 'cancelled'].includes(status) && !status.startsWith('awaiting_');
 }
 
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'outline' {

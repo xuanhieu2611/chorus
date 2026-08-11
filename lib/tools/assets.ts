@@ -160,13 +160,13 @@ export async function prepareAssetRevision(
   );
 }
 
-/** An asset that has exhausted its revision path is excluded from the package. */
+/** An asset that has exhausted its review path or budget is excluded from the package. */
 export async function abandonAsset(assetId: string): Promise<AssetRow> {
   const { data, error } = await db()
     .from('assets')
     .update({ status: 'abandoned', updated_at: new Date().toISOString() })
     .eq('id', assetId)
-    .in('status', ['needs_review', 'rejected', 'revising'])
+    .in('status', ['planned', 'generating', 'needs_review', 'rejected', 'revising'])
     .select()
     .maybeSingle();
 
